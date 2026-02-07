@@ -34,6 +34,10 @@ cmd_list() {
     found="true"
     local id
     id="$(basename "$d" | sed 's/^\.vm-//')"
+    if [[ ! "$id" =~ ^[a-z0-9_-]+$ ]]; then
+      warn "Skipping invalid instance state directory: $d"
+      continue
+    fi
     load_instance_env "$id"
     local health="down"
     curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && health="up"
@@ -48,6 +52,7 @@ cmd_list() {
 
 cmd_status_one() {
   local id="$1"
+  validate_instance_id "$id"
   load_instance_env "$id"
   local vm_state proxy_state health guest
   vm_state="$(systemctl is-active "$(vm_service "$id")" 2>/dev/null || echo inactive)"
@@ -71,6 +76,7 @@ cmd_status() {
 
 cmd_start() {
   local id="$1"
+  validate_instance_id "$id"
   require_root
   load_instance_env "$id"
 
@@ -85,6 +91,7 @@ cmd_start() {
 
 cmd_stop() {
   local id="$1"
+  validate_instance_id "$id"
   require_root
   load_instance_env "$id"
 
@@ -104,6 +111,7 @@ cmd_restart() {
 cmd_logs() {
   local id="$1"
   local mode="${2:-guest}"
+  validate_instance_id "$id"
   load_instance_env "$id"
 
   if [[ "$mode" == "host" ]]; then
@@ -118,6 +126,7 @@ cmd_logs() {
 cmd_shell() {
   local id="$1"
   shift || true
+  validate_instance_id "$id"
   load_instance_env "$id"
   wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 30 || die "VM SSH unavailable"
 
@@ -130,12 +139,14 @@ cmd_shell() {
 
 cmd_token() {
   local id="$1"
+  validate_instance_id "$id"
   cat "$(instance_token "$id")"
 }
 
 cmd_destroy() {
   local id="$1"
   local force="${2:-}"
+  validate_instance_id "$id"
   require_root
   load_instance_env "$id"
 
