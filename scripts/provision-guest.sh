@@ -186,7 +186,7 @@ chmod 600 "$ENV_FILE"
 docker pull "$OPENCLAW_IMAGE"
 
 run_openclaw_cli() {
-  docker run --rm -i -T \
+  docker run --rm -i \
     --network host \
     -e HOME=/home/node \
     -e OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" \
@@ -263,7 +263,7 @@ EOF
 fi
 
 if [[ "${SKIP_BROWSER_INSTALL:-false}" != "true" ]]; then
-  docker run --rm -T \
+  docker run --rm \
     --network host \
     -e PLAYWRIGHT_BROWSERS_PATH=/home/node/clawd/tools/.playwright \
     -v "$TOOLS_DIR:/home/node/clawd/tools" \

@@ -27,17 +27,17 @@ Host
 ```
 
 State locations:
-- Repo-local: `.vm-demo/.vm-<id>/` (env, token, provision vars)
-- Host filesystem: `/srv/firecracker/vm-demo/<id>/` (VM images, config, logs)
+- Instance state: `/var/lib/fireclaw/.vm-<id>/` (env, token, provision vars)
+- VM runtime: `/srv/firecracker/vm-demo/<id>/` (VM images, config, logs)
 
-## Scripts
+## Commands
 
-### bin/vm-setup
+### fireclaw setup
 
 One-shot instance creator. Must run as root.
 
 ```bash
-sudo ./bin/vm-setup \
+sudo fireclaw setup \
   --instance <id> \
   --telegram-token "<token>" \
   --telegram-users "<user-ids>" \
@@ -61,26 +61,26 @@ Options:
 | `--vm-mem-mib` | `8192` |
 | `--skip-browser-install` | `false` |
 
-### bin/vm-ctl
+### fireclaw (lifecycle)
 
-Lifecycle management. Most commands require root.
+Most commands require root.
 
 ```bash
-sudo ./bin/vm-ctl list                    # all instances with health
-sudo ./bin/vm-ctl status <id>             # detailed status including guest service
-sudo ./bin/vm-ctl start <id>              # boot VM + start guest + enable proxy
-sudo ./bin/vm-ctl stop <id>               # graceful shutdown (guest → VM → proxy)
-sudo ./bin/vm-ctl restart <id>            # stop then start
-sudo ./bin/vm-ctl logs <id>               # tail guest (OpenClaw) logs via SSH
-sudo ./bin/vm-ctl logs <id> host          # tail host (Firecracker + proxy) logs
-sudo ./bin/vm-ctl shell <id>              # SSH into VM
-sudo ./bin/vm-ctl shell <id> "command"    # run command inside VM
-sudo ./bin/vm-ctl token <id>              # print gateway token
-sudo ./bin/vm-ctl destroy <id>            # interactive destroy
-sudo ./bin/vm-ctl destroy <id> --force    # skip confirmation
+sudo fireclaw list                    # all instances with health
+sudo fireclaw status <id>             # detailed status including guest service
+sudo fireclaw start <id>              # boot VM + start guest + enable proxy
+sudo fireclaw stop <id>               # graceful shutdown (guest → VM → proxy)
+sudo fireclaw restart <id>            # stop then start
+sudo fireclaw logs <id>               # tail guest (OpenClaw) logs via SSH
+sudo fireclaw logs <id> host          # tail host (Firecracker + proxy) logs
+sudo fireclaw shell <id>              # SSH into VM
+sudo fireclaw shell <id> "command"    # run command inside VM
+sudo fireclaw token <id>              # print gateway token
+sudo fireclaw destroy <id>            # interactive destroy
+sudo fireclaw destroy <id> --force    # skip confirmation
 ```
 
-### bin/vm-common.sh
+### Internal: bin/vm-common.sh
 
 Shared library sourced by all scripts. Provides: path helpers, instance ID validation, IP/port allocation (scans .env files), bridge/NAT setup, SSH wait loop, systemd unit name generators.
 
@@ -92,10 +92,10 @@ Runs inside the VM as root. Installs Docker, pulls OpenClaw image, configures vi
 
 If an instance is unhealthy:
 
-1. Check host-side services: `sudo ./bin/vm-ctl status <id>` — look at vm/proxy/guest/health fields
-2. If VM is active but guest is down: `sudo ./bin/vm-ctl shell <id> "sudo systemctl status openclaw-<id>.service"`
-3. Check guest logs: `sudo ./bin/vm-ctl logs <id>`
-4. Check host logs: `sudo ./bin/vm-ctl logs <id> host`
+1. Check host-side services: `sudo fireclaw status <id>` — look at vm/proxy/guest/health fields
+2. If VM is active but guest is down: `sudo fireclaw shell <id> "sudo systemctl status openclaw-<id>.service"`
+3. Check guest logs: `sudo fireclaw logs <id>`
+4. Check host logs: `sudo fireclaw logs <id> host`
 5. Check Firecracker log: read `/srv/firecracker/vm-demo/<id>/logs/firecracker.log`
 6. If SSH fails: VM may not have booted — check host logs for Firecracker errors
 7. Health endpoint: `curl -fsS http://127.0.0.1:<HOST_PORT>/health`
@@ -104,7 +104,7 @@ If an instance is unhealthy:
 
 | Variable | Default |
 |----------|---------|
-| `STATE_ROOT` | `<repo>/.vm-demo` |
+| `STATE_ROOT` | `/var/lib/fireclaw` |
 | `FC_ROOT` | `/srv/firecracker/vm-demo` |
 | `BASE_PORT` | `18890` |
 | `BRIDGE_NAME` | `fcbr0` |
@@ -115,7 +115,7 @@ If an instance is unhealthy:
 
 ## Modifying Scripts
 
-- `vm-common.sh` is sourced by both `vm-setup` and `vm-ctl` — changes there affect everything
+- `bin/vm-common.sh` is sourced by both `vm-setup` and `vm-ctl` — changes there affect all commands
 - Instance IDs must match `^[a-z0-9_-]+$` — this is enforced by `validate_instance_id`
 - IP allocation uses 172.16.0.x where x starts at 2 (gateway is .1), max 254 instances
 - Port allocation starts at BASE_PORT+1 and increments per instance

@@ -1,0 +1,42 @@
+{
+  "name": "fireclaw",
+  "version": "0.1.0",
+  "description": "Firecracker microVM control plane for isolated OpenClaw instances",
+  "bin": {
+    "fireclaw": "bin/fireclaw"
+  },
+  "files": [
+    "bin",
+    "scripts/provision-guest.sh",
+    "README.md"
+  ],
+  "scripts": {
+    "lint:shell": "bash -n bin/fireclaw && bash -n bin/vm-common.sh && bash -n bin/vm-setup && bash -n bin/vm-ctl && bash -n scripts/provision-guest.sh",
+    "test": "npm run lint:shell",
+    "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "npm test && npm run pack:check"
+  },
+  "keywords": [
+    "firecracker",
+    "openclaw",
+    "vm",
+    "cli",
+    "systemd"
+  ],
+  "homepage": "https://github.com/bchewy/fireclaw#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bchewy/fireclaw.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bchewy/fireclaw/issues"
+  },
+  "license": "UNLICENSED",
+  "author": "bchewy",
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux"
+  ]
+}

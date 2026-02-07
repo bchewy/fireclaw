@@ -1,4 +1,4 @@
-# fireclaw-vm-demo
+# fireclaw
 
 Run [OpenClaw](https://github.com/openclaw/openclaw) instances inside Firecracker microVMs, each fully isolated with its own filesystem, network, and process tree.
 
@@ -28,15 +28,15 @@ Host
     └── Browser binaries (Playwright Chromium, installed at provision time)
 ```
 
-1. **`vm-setup`** creates a new instance: copies the base rootfs, optionally resizes it (default `40G`), generates a cloud-init seed image, allocates an IP + host port, writes a Firecracker config, creates systemd units, boots the VM with a per-instance Firecracker API socket, waits for SSH, then SCPs `provision-guest.sh` into the guest and runs it.
+1. **`fireclaw setup`** creates a new instance: copies the base rootfs, optionally resizes it (default `40G`), generates a cloud-init seed image, allocates an IP + host port, writes a Firecracker config, creates systemd units, boots the VM with a per-instance Firecracker API socket, waits for SSH, then SCPs `provision-guest.sh` into the guest and runs it.
 
 2. **`provision-guest.sh`** runs inside the VM as root: waits for cloud-init/apt locks, expands the guest ext4 filesystem (`resize2fs`), configures Docker for Firecracker (`iptables=false`, `ip6tables=false`, `bridge=none`), pulls the OpenClaw image, runs the OpenClaw CLI (`doctor --fix` included), installs Playwright Chromium, writes browser path + health-check script, then creates and starts the guest systemd service.
 
-3. **`vm-ctl`** manages the lifecycle after setup: start/stop/restart VMs, tail logs (guest or host side), open an SSH shell, show status, or destroy an instance.
+3. **`fireclaw`** manages the lifecycle after setup: start/stop/restart VMs, tail logs (guest or host side), open an SSH shell, show status, or destroy an instance.
 
 All state lives in two places:
-- **Repo-local** `.vm-demo/.vm-<id>/` — env file, token, provision vars
-- **Host filesystem** `/srv/firecracker/vm-demo/<id>/` — VM images, Firecracker config, logs
+- **Instance state** `/var/lib/fireclaw/.vm-<id>/` — env file, token, provision vars
+- **VM runtime** `/srv/firecracker/vm-demo/<id>/` — VM images, Firecracker config, logs
 
 ## Prerequisites
 
@@ -48,30 +48,24 @@ All state lives in two places:
 
 Set `BASE_IMAGES_DIR` or pass `--base-kernel`/`--base-rootfs`/`--base-initrd` to point at your images.
 
+## Install
+
+```bash
+npm install -g fireclaw
+```
+
 ## Setup
 
 ```bash
-# 1. Clone
-git clone https://github.com/bchewy/fireclaw-vm-demo.git
-cd fireclaw-vm-demo
-
-# 2. Create an instance
-sudo ./bin/vm-setup \
+sudo fireclaw setup \
   --instance my-bot \
   --telegram-token "<your-bot-token>" \
   --telegram-users "<your-telegram-user-id>" \
   --model "anthropic/claude-opus-4-6" \
   --anthropic-api-key "<key>"
-
-# vm-setup will:
-#   - generate an SSH keypair (if needed)
-#   - copy + configure the rootfs
-#   - boot the VM via systemd
-#   - wait for SSH
-#   - provision OpenClaw inside the guest
-#   - start the localhost proxy
-#   - print the instance details (IP, port, token)
 ```
+
+This will generate an SSH keypair (if needed), copy + configure the rootfs, boot the VM via systemd, wait for SSH, provision OpenClaw inside the guest, start the localhost proxy, and print the instance details (IP, port, token).
 
 ### Options
 
@@ -96,41 +90,41 @@ sudo ./bin/vm-setup \
 
 ```bash
 # List all instances
-sudo ./bin/vm-ctl list
+sudo fireclaw list
 
 # Status of one instance
-sudo ./bin/vm-ctl status my-bot
+sudo fireclaw status my-bot
 
 # Stop / start / restart
-sudo ./bin/vm-ctl stop my-bot
-sudo ./bin/vm-ctl start my-bot
-sudo ./bin/vm-ctl restart my-bot
+sudo fireclaw stop my-bot
+sudo fireclaw start my-bot
+sudo fireclaw restart my-bot
 
 # Tail guest logs (OpenClaw service)
-sudo ./bin/vm-ctl logs my-bot
+sudo fireclaw logs my-bot
 
 # Tail host logs (Firecracker + proxy)
-sudo ./bin/vm-ctl logs my-bot host
+sudo fireclaw logs my-bot host
 
 # SSH into the VM
-sudo ./bin/vm-ctl shell my-bot
+sudo fireclaw shell my-bot
 
 # Run a command inside the VM
-sudo ./bin/vm-ctl shell my-bot "docker ps"
+sudo fireclaw shell my-bot "docker ps"
 
 # Get the gateway token
-sudo ./bin/vm-ctl token my-bot
+sudo fireclaw token my-bot
 
 # Health check
 curl -fsS http://127.0.0.1:<HOST_PORT>/health
 # If proxy health is flaky, inspect VM-side health too:
-sudo ./bin/vm-ctl status my-bot
+sudo fireclaw status my-bot
 
 # Destroy (interactive confirmation)
-sudo ./bin/vm-ctl destroy my-bot
+sudo fireclaw destroy my-bot
 
 # Destroy (skip confirmation)
-sudo ./bin/vm-ctl destroy my-bot --force
+sudo fireclaw destroy my-bot --force
 ```
 
 ## Networking
@@ -143,7 +137,7 @@ All scripts respect these overrides:
 
 | Variable | Default |
 |----------|---------|
-| `STATE_ROOT` | `<repo>/.vm-demo` |
+| `STATE_ROOT` | `/var/lib/fireclaw` |
 | `FC_ROOT` | `/srv/firecracker/vm-demo` |
 | `BASE_PORT` | `18890` |
 | `BRIDGE_NAME` | `fcbr0` |
