@@ -15,6 +15,8 @@ Options:
   --openclaw-image <image>
   --vm-vcpu <n>                        (default: 4)
   --vm-mem-mib <n>                     (default: 8192)
+  --disk-size <size>                   (default: 40G)
+  --api-sock <path>                    (default: <fc-instance-dir>/firecracker.socket)
   --base-kernel <path>
   --base-rootfs <path>
   --base-initrd <path>
@@ -34,6 +36,8 @@ SKILLS="${SKILLS:-github,tmux,coding-agent,session-logs,skill-creator}"
 OPENCLAW_IMAGE="$OPENCLAW_IMAGE_DEFAULT"
 VM_VCPU="${VM_VCPU:-4}"
 VM_MEM_MIB="${VM_MEM_MIB:-8192}"
+DISK_SIZE="${DISK_SIZE:-40G}"
+API_SOCK="${API_SOCK:-}"
 BASE_IMAGES_DIR="${BASE_IMAGES_DIR:-/srv/firecracker/base/images}"
 BASE_KERNEL="${BASE_KERNEL:-$BASE_IMAGES_DIR/vmlinux}"
 BASE_ROOTFS="${BASE_ROOTFS:-$BASE_IMAGES_DIR/rootfs.ext4}"
@@ -54,6 +58,8 @@ while [[ $# -gt 0 ]]; do
     --openclaw-image) OPENCLAW_IMAGE="$2"; shift 2 ;;
     --vm-vcpu) VM_VCPU="$2"; shift 2 ;;
     --vm-mem-mib) VM_MEM_MIB="$2"; shift 2 ;;
+    --disk-size) DISK_SIZE="$2"; shift 2 ;;
+    --api-sock) API_SOCK="$2"; shift 2 ;;
     --base-kernel) BASE_KERNEL="$2"; shift 2 ;;
     --base-rootfs) BASE_ROOTFS="$2"; shift 2 ;;
     --base-initrd) BASE_INITRD="$2"; shift 2 ;;
@@ -71,7 +77,7 @@ done
 validate_instance_id "$INSTANCE"
 
 require_root
-for c in firecracker systemctl ip iptables openssl jq cloud-localds ssh scp socat curl; do
+for c in firecracker systemctl ip iptables openssl jq cloud-localds ssh scp socat curl qemu-img; do
   require_cmd "$c"
 done
 
@@ -88,6 +94,10 @@ fi
 
 inst_dir="$(instance_dir "$INSTANCE")"
 fc_dir="$(fc_instance_dir "$INSTANCE")"
+if [[ -z "$API_SOCK" ]]; then
+  API_SOCK="$fc_dir/firecracker.socket"
+fi
+[[ "$API_SOCK" = /* ]] || die "--api-sock must be an absolute path"
 [[ ! -e "$inst_dir" ]] || die "Instance already exists: $inst_dir"
 
 HOST_PORT="$(next_port)"
@@ -101,6 +111,7 @@ GATEWAY_TOKEN="$(openssl rand -hex 32)"
 
 mkdir -p "$inst_dir/config" "$inst_dir/workspace"
 mkdir -p "$fc_dir/images" "$fc_dir/config" "$fc_dir/logs"
+mkdir -p "$(dirname "$API_SOCK")"
 
 cat > "$inst_dir/.env" <<EOF
 INSTANCE_ID=$INSTANCE
@@ -115,6 +126,8 @@ TELEGRAM_USERS=$TELEGRAM_USERS
 OPENCLAW_IMAGE=$OPENCLAW_IMAGE
 VM_VCPU=$VM_VCPU
 VM_MEM_MIB=$VM_MEM_MIB
+DISK_SIZE=$DISK_SIZE
+API_SOCK=$API_SOCK
 SSH_KEY_PATH=$SSH_KEY_PATH
 SKIP_BROWSER_INSTALL=$SKIP_BROWSER_INSTALL
 ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
@@ -127,6 +140,10 @@ chmod 600 "$inst_dir/.token"
 
 log "Preparing VM disk and assets"
 cp --reflink=auto "$BASE_ROOTFS" "$fc_dir/images/rootfs.ext4" 2>/dev/null || cp "$BASE_ROOTFS" "$fc_dir/images/rootfs.ext4"
+if [[ -n "$DISK_SIZE" ]]; then
+  log "Resizing rootfs to $DISK_SIZE"
+  qemu-img resize "$fc_dir/images/rootfs.ext4" "$DISK_SIZE" >/dev/null
+fi
 cp "$BASE_KERNEL" "$fc_dir/images/vmlinux"
 
 INITRD_PATH=""
@@ -216,6 +233,7 @@ BRIDGE_NAME="$BRIDGE_NAME"
 BRIDGE_ADDR="$BRIDGE_ADDR"
 SUBNET_CIDR="$SUBNET_CIDR"
 VM_TAP="$VM_TAP"
+API_SOCK="$API_SOCK"
 CONFIG_JSON="$fc_dir/config/vm-config.json"
 
 if ! ip link show "\$BRIDGE_NAME" >/dev/null 2>&1; then
@@ -230,7 +248,8 @@ ip tuntap add dev "\$VM_TAP" mode tap user root 2>/dev/null || true
 ip link set "\$VM_TAP" master "\$BRIDGE_NAME"
 ip link set "\$VM_TAP" up
 
-exec /usr/local/bin/firecracker --config-file "\$CONFIG_JSON"
+rm -f "\$API_SOCK"
+exec /usr/local/bin/firecracker --api-sock "\$API_SOCK" --config-file "\$CONFIG_JSON"
 EOF
 chmod +x "$fc_dir/start-vm.sh"
 
@@ -299,6 +318,7 @@ kv SKILLS "$SKILLS"
 kv GATEWAY_TOKEN "$GATEWAY_TOKEN"
 kv OPENCLAW_IMAGE "$OPENCLAW_IMAGE"
 kv SKIP_BROWSER_INSTALL "$SKIP_BROWSER_INSTALL"
+kv DISK_SIZE "$DISK_SIZE"
 kv ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
 kv OPENAI_API_KEY "$OPENAI_API_KEY"
 kv MINIMAX_API_KEY "$MINIMAX_API_KEY"
@@ -315,10 +335,17 @@ ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile
 
 systemctl enable --now "$PROXY_SVC"
 
-health_ok="false"
+host_health_ok="false"
+guest_health_ok="false"
+GUEST_HEALTH_SCRIPT="$(guest_health_script "$INSTANCE")"
 for _ in {1..30}; do
-  if curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1; then
-    health_ok="true"
+  if [[ "$guest_health_ok" != "true" ]] && check_guest_health "$INSTANCE" "$VM_IP" "$SSH_KEY_PATH"; then
+    guest_health_ok="true"
+  fi
+  if [[ "$host_health_ok" != "true" ]] && curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1; then
+    host_health_ok="true"
+  fi
+  if [[ "$guest_health_ok" == "true" && "$host_health_ok" == "true" ]]; then
     break
   fi
   sleep 2
@@ -329,7 +356,13 @@ echo "  Instance: $INSTANCE"
 echo "  VM IP:    $VM_IP"
 echo "  Port:     $HOST_PORT"
 echo "  Token:    $GATEWAY_TOKEN"
-if [[ "$health_ok" != "true" ]]; then
-  echo "  Health:   pending (service may still be warming up)"
+if [[ "$guest_health_ok" == "true" && "$host_health_ok" == "true" ]]; then
+  echo "  Health:   up (guest + proxy)"
+elif [[ "$guest_health_ok" == "true" ]]; then
+  echo "  Health:   guest up, proxy pending"
+elif [[ "$host_health_ok" == "true" ]]; then
+  echo "  Health:   proxy up (guest check pending)"
+else
+  echo "  Health:   pending (guest script: $GUEST_HEALTH_SCRIPT)"
 fi
 echo "  Status:   $(systemctl is-active "$VM_SVC") / $(systemctl is-active "$PROXY_SVC")"

@@ -39,12 +39,21 @@ cmd_list() {
       continue
     fi
     load_instance_env "$id"
+    local ssh_key="${SSH_KEY_PATH:-$HOME/.ssh/vmdemo_vm}"
     local health="down"
-    curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && health="up"
+    local host_health="down"
+    local guest_health="down"
+    curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && host_health="up"
+    if check_guest_health "$id" "$VM_IP" "$ssh_key"; then
+      guest_health="up"
+    fi
+    if [[ "$host_health" == "up" || "$guest_health" == "up" ]]; then
+      health="up"
+    fi
     local vm_state proxy_state
     vm_state="$(systemctl is-active "$(vm_service "$id")" 2>/dev/null || echo inactive)"
     proxy_state="$(systemctl is-active "$(proxy_service "$id")" 2>/dev/null || echo inactive)"
-    echo "$id ip=$VM_IP port=$HOST_PORT vm=$vm_state proxy=$proxy_state health=$health"
+    echo "$id ip=$VM_IP port=$HOST_PORT vm=$vm_state proxy=$proxy_state health=$health host_health=$host_health guest_health=$guest_health"
   done
   shopt -u nullglob
   [[ "$found" == "true" ]] || echo "(no instances)"
@@ -54,16 +63,25 @@ cmd_status_one() {
   local id="$1"
   validate_instance_id "$id"
   load_instance_env "$id"
-  local vm_state proxy_state health guest
+  local ssh_key="${SSH_KEY_PATH:-$HOME/.ssh/vmdemo_vm}"
+  local vm_state proxy_state health host_health guest_health guest
   vm_state="$(systemctl is-active "$(vm_service "$id")" 2>/dev/null || echo inactive)"
   proxy_state="$(systemctl is-active "$(proxy_service "$id")" 2>/dev/null || echo inactive)"
   health="down"
-  curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && health="up"
+  host_health="down"
+  guest_health="down"
+  curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && host_health="up"
   guest="unknown"
-  if wait_for_ssh "$VM_IP" "${SSH_KEY_PATH:-$HOME/.ssh/vmdemo_vm}" 1; then
+  if wait_for_ssh "$VM_IP" "$ssh_key" 1; then
     guest="$(ssh_run "$VM_IP" "systemctl is-active openclaw-$id.service" 2>/dev/null || echo unknown)"
+    if check_guest_health "$id" "$VM_IP" "$ssh_key"; then
+      guest_health="up"
+    fi
   fi
-  echo "$id ip=$VM_IP port=$HOST_PORT vm=$vm_state proxy=$proxy_state guest=$guest health=$health"
+  if [[ "$host_health" == "up" || "$guest_health" == "up" ]]; then
+    health="up"
+  fi
+  echo "$id ip=$VM_IP port=$HOST_PORT vm=$vm_state proxy=$proxy_state guest=$guest health=$health host_health=$host_health guest_health=$guest_health"
 }
 
 cmd_status() {

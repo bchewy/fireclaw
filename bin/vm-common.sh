@@ -34,6 +34,7 @@ instance_token()    { printf '%s/.token\n' "$(instance_dir "$1")"; }
 fc_instance_dir()   { printf '%s/%s\n' "$FC_ROOT" "$1"; }
 vm_service()        { printf 'firecracker-vmdemo-%s.service\n' "$1"; }
 proxy_service()     { printf 'vmdemo-proxy-%s.service\n' "$1"; }
+guest_health_script() { printf '/usr/local/bin/openclaw-health-%s.sh\n' "$1"; }
 
 load_instance_env() {
   local id="$1"
@@ -103,4 +104,13 @@ wait_for_ssh() {
     sleep 2
   done
   return 1
+}
+
+check_guest_health() {
+  local id="$1"
+  local ip="$2"
+  local key="${3:-$SSH_KEY_PATH}"
+  local script
+  script="$(guest_health_script "$id")"
+  ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 "ubuntu@$ip" "if [[ -x '$script' ]]; then sudo '$script'; else curl -fsS http://127.0.0.1:18789/health >/dev/null; fi" >/dev/null 2>&1
 }

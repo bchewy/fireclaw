@@ -29,15 +29,143 @@ WORKSPACE_DIR="/home/ubuntu/openclaw-${INSTANCE_ID}/workspace"
 TOOLS_DIR="/home/ubuntu/openclaw-${INSTANCE_ID}/tools"
 ENV_FILE="$CONFIG_ROOT/openclaw.env"
 GUEST_SERVICE="openclaw-${INSTANCE_ID}.service"
+HEALTH_SCRIPT="/usr/local/bin/openclaw-health-${INSTANCE_ID}.sh"
+
+log()  { printf '==> %s\n' "$*"; }
+warn() { printf 'Warning: %s\n' "$*" >&2; }
+
+wait_for_cloud_init() {
+  if command -v cloud-init >/dev/null 2>&1; then
+    log "Waiting for cloud-init to finish"
+    cloud-init status --wait >/dev/null 2>&1 || warn "cloud-init wait failed; continuing"
+  fi
+}
+
+wait_for_apt_locks() {
+  local timeout="${1:-300}"
+  local waited=0
+  local lock_files=(
+    /var/lib/dpkg/lock-frontend
+    /var/lib/dpkg/lock
+    /var/lib/apt/lists/lock
+    /var/cache/apt/archives/lock
+  )
+
+  while true; do
+    local locked=0
+    if command -v fuser >/dev/null 2>&1; then
+      local lock
+      for lock in "${lock_files[@]}"; do
+        if [[ -e "$lock" ]] && fuser "$lock" >/dev/null 2>&1; then
+          locked=1
+          break
+        fi
+      done
+    else
+      pgrep -f 'apt|dpkg' >/dev/null 2>&1 && locked=1
+    fi
+
+    if [[ "$locked" -eq 0 ]]; then
+      return 0
+    fi
+
+    if (( waited == 0 )); then
+      log "Waiting for apt/dpkg locks to clear"
+    fi
+    sleep 2
+    waited=$((waited + 2))
+    (( waited < timeout )) || { echo "Timed out waiting for apt locks" >&2; return 1; }
+  done
+}
+
+apt_get_retry() {
+  local attempt
+  for attempt in {1..5}; do
+    wait_for_apt_locks
+    if apt-get "$@"; then
+      return 0
+    fi
+    if (( attempt == 5 )); then
+      echo "apt-get $* failed after $attempt attempts" >&2
+      return 1
+    fi
+    warn "apt-get $* failed (attempt $attempt/5), retrying"
+    sleep 3
+  done
+}
+
+maybe_resize_rootfs() {
+  command -v resize2fs >/dev/null 2>&1 || { warn "resize2fs not found; skipping rootfs expansion"; return 0; }
+
+  local root_device fs_device fs_type
+  root_device="$(findmnt -n -o SOURCE / || true)"
+  if [[ "$root_device" == "/dev/root" ]]; then
+    root_device="$(readlink -f /dev/root || true)"
+  fi
+
+  fs_device=""
+  for candidate in "$root_device" /dev/vda; do
+    [[ -n "$candidate" && -b "$candidate" ]] || continue
+    fs_type="$(blkid -s TYPE -o value "$candidate" 2>/dev/null || true)"
+    if [[ "$fs_type" == "ext4" ]]; then
+      fs_device="$candidate"
+      break
+    fi
+  done
+
+  if [[ -z "$fs_device" ]]; then
+    warn "No ext4 root block device found for resize2fs; skipping"
+    return 0
+  fi
+
+  log "Expanding ext4 filesystem on $fs_device"
+  resize2fs "$fs_device" || warn "resize2fs failed on $fs_device; continuing"
+}
+
+ensure_docker_daemon_config() {
+  local docker_cfg="/etc/docker/daemon.json"
+  local tmp_cfg
+  local restart_needed="false"
+  tmp_cfg="$(mktemp)"
+
+  cat > "$tmp_cfg" <<'EOF'
+{
+  "iptables": false,
+  "ip6tables": false,
+  "bridge": "none"
+}
+EOF
+
+  mkdir -p /etc/docker
+  if [[ ! -f "$docker_cfg" ]] || ! cmp -s "$tmp_cfg" "$docker_cfg"; then
+    install -m 0644 "$tmp_cfg" "$docker_cfg"
+    restart_needed="true"
+  fi
+  rm -f "$tmp_cfg"
+
+  systemctl enable docker >/dev/null 2>&1 || true
+  if [[ "$restart_needed" == "true" ]]; then
+    systemctl restart docker
+  elif ! systemctl is-active --quiet docker; then
+    systemctl restart docker
+  fi
+}
 
 export DEBIAN_FRONTEND=noninteractive
 
+wait_for_cloud_init
+wait_for_apt_locks
+maybe_resize_rootfs
+
 if ! command -v docker >/dev/null 2>&1; then
-  apt-get update -y
-  apt-get install -y docker.io jq curl ca-certificates
+  apt_get_retry update
+  apt_get_retry install -y docker.io jq curl ca-certificates
 fi
-systemctl enable docker
-systemctl restart docker
+if ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+  apt_get_retry update
+  apt_get_retry install -y jq curl ca-certificates
+fi
+ensure_docker_daemon_config
 
 mkdir -p "$CONFIG_DIR" "$WORKSPACE_DIR" "$TOOLS_DIR"
 chown -R ubuntu:ubuntu "$CONFIG_ROOT" "/home/ubuntu/openclaw-${INSTANCE_ID}"
@@ -59,6 +187,7 @@ docker pull "$OPENCLAW_IMAGE"
 
 run_openclaw_cli() {
   docker run --rm -i -T \
+    --network host \
     -e HOME=/home/node \
     -e OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" \
     -e OPENCLAW_TELEGRAM_TOKEN="$TELEGRAM_TOKEN" \
@@ -135,17 +264,20 @@ fi
 
 if [[ "${SKIP_BROWSER_INSTALL:-false}" != "true" ]]; then
   docker run --rm -T \
+    --network host \
     -e PLAYWRIGHT_BROWSERS_PATH=/home/node/clawd/tools/.playwright \
-    -e PUPPETEER_CACHE_DIR=/home/node/clawd/tools/.puppeteer-cache \
     -v "$TOOLS_DIR:/home/node/clawd/tools" \
     --entrypoint /bin/bash \
     "$OPENCLAW_IMAGE" -lc "
-      set -e
-      npx --yes @puppeteer/browsers install chrome-headless-shell@stable || true
-      npx --yes playwright install chromium || true
+      set -euo pipefail
+      npx --yes playwright@latest install chromium
     "
 
-  chrome_host_path="$(find "$TOOLS_DIR/.puppeteer-cache" -type f -name chrome-headless-shell | head -n 1 || true)"
+  chrome_host_path="$(
+    find "$TOOLS_DIR/.playwright" -type f \
+      \( -path '*/chromium_headless_shell-*/chrome-headless-shell' -o -name 'chrome-headless-shell' -o -name 'headless_shell' \) \
+      | sort | head -n 1 || true
+  )"
   if [[ -n "$chrome_host_path" ]]; then
     chrome_container_path="${chrome_host_path/#$TOOLS_DIR/\/home\/node\/clawd\/tools}"
     OPENCLAW_BROWSER_PATH="$chrome_container_path"
@@ -153,8 +285,30 @@ if [[ "${SKIP_BROWSER_INSTALL:-false}" != "true" ]]; then
 OPENCLAW='node /app/openclaw.mjs'
 $OPENCLAW config set browser.executablePath "$OPENCLAW_BROWSER_PATH"
 EOF
+  else
+    warn "Playwright Chromium installed but executable path was not found in $TOOLS_DIR/.playwright"
   fi
 fi
+
+run_openclaw_cli <<'EOF'
+set -euo pipefail
+OPENCLAW='node /app/openclaw.mjs'
+$OPENCLAW doctor --fix || true
+EOF
+
+cat > "$HEALTH_SCRIPT" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONTAINER_NAME="openclaw-${INSTANCE_ID}"
+
+if ! /usr/bin/docker inspect -f '{{.State.Running}}' "\$CONTAINER_NAME" 2>/dev/null | grep -qx true; then
+  exit 1
+fi
+
+curl -fsS http://127.0.0.1:18789/health >/dev/null
+EOF
+chmod 755 "$HEALTH_SCRIPT"
 
 cat > "/etc/systemd/system/$GUEST_SERVICE" <<EOF
 [Unit]
@@ -165,7 +319,7 @@ Requires=docker.service
 [Service]
 Type=simple
 ExecStartPre=-/usr/bin/docker rm -f openclaw-$INSTANCE_ID
-ExecStart=/usr/bin/docker run --rm --name openclaw-$INSTANCE_ID --init --env-file $ENV_FILE -v $CONFIG_DIR:/home/node/.openclaw -v $WORKSPACE_DIR:/home/node/.openclaw/workspace -v $TOOLS_DIR:/home/node/clawd/tools $OPENCLAW_IMAGE node dist/index.js gateway --bind lan --port 18789
+ExecStart=/usr/bin/docker run --rm --name openclaw-$INSTANCE_ID --init --network host --env-file $ENV_FILE -v $CONFIG_DIR:/home/node/.openclaw -v $WORKSPACE_DIR:/home/node/.openclaw/workspace -v $TOOLS_DIR:/home/node/clawd/tools $OPENCLAW_IMAGE node dist/index.js gateway --bind lan --port 18789
 ExecStop=/usr/bin/docker stop openclaw-$INSTANCE_ID
 Restart=always
 RestartSec=5

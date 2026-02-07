@@ -24,13 +24,13 @@ Host
 └── Firecracker VM (172.16.0.x)
     ├── cloud-init: ubuntu user, SSH key, Docker install
     ├── Docker: pulls OpenClaw image
-    ├── systemd: openclaw-<id>.service          ← docker run ... gateway --bind lan --port 18789
-    └── Browser binaries (Puppeteer + Playwright, installed at provision time)
+    ├── systemd: openclaw-<id>.service          ← docker run --network host ... gateway --bind lan --port 18789
+    └── Browser binaries (Playwright Chromium, installed at provision time)
 ```
 
-1. **`vm-setup`** creates a new instance: copies the base rootfs, generates a cloud-init seed image, allocates an IP + host port, writes a Firecracker config, creates systemd units, boots the VM, waits for SSH, then SCPs `provision-guest.sh` into the guest and runs it.
+1. **`vm-setup`** creates a new instance: copies the base rootfs, optionally resizes it (default `40G`), generates a cloud-init seed image, allocates an IP + host port, writes a Firecracker config, creates systemd units, boots the VM with a per-instance Firecracker API socket, waits for SSH, then SCPs `provision-guest.sh` into the guest and runs it.
 
-2. **`provision-guest.sh`** runs inside the VM as root: installs Docker, pulls the OpenClaw image, runs the OpenClaw CLI to configure gateway auth, Telegram bot, model selection, skills, and browser paths, then creates and starts the guest systemd service.
+2. **`provision-guest.sh`** runs inside the VM as root: waits for cloud-init/apt locks, expands the guest ext4 filesystem (`resize2fs`), configures Docker for Firecracker (`iptables=false`, `ip6tables=false`, `bridge=none`), pulls the OpenClaw image, runs the OpenClaw CLI (`doctor --fix` included), installs Playwright Chromium, writes browser path + health-check script, then creates and starts the guest systemd service.
 
 3. **`vm-ctl`** manages the lifecycle after setup: start/stop/restart VMs, tail logs (guest or host side), open an SSH shell, show status, or destroy an instance.
 
@@ -42,6 +42,7 @@ All state lives in two places:
 
 - Linux host with KVM support (`/dev/kvm` accessible)
 - `firecracker` binary at `/usr/local/bin/firecracker` ([install guide](https://github.com/firecracker-microvm/firecracker/blob/main/docs/getting-started.md))
+- `qemu-img` (from `qemu-utils`) for rootfs resizing
 - `cloud-localds` (from `cloud-image-utils`), `socat`, `jq`, `iptables`, `iproute2`, `ssh`, `scp`, `curl`, `openssl`
 - Base VM images: a Linux kernel (`vmlinux`) and an ext4 rootfs with cloud-init support. Optionally an initrd.
 
@@ -84,10 +85,12 @@ sudo ./bin/vm-setup \
 | `--openclaw-image` | `ghcr.io/openclaw/openclaw:latest` | Docker image for OpenClaw |
 | `--vm-vcpu` | `4` | vCPUs per VM |
 | `--vm-mem-mib` | `8192` | Memory per VM (MiB) |
+| `--disk-size` | `40G` | Resize copied rootfs image to this virtual size before boot |
+| `--api-sock` | `<fc-dir>/firecracker.socket` | Firecracker API socket path (must be unique per VM) |
 | `--anthropic-api-key` | | Anthropic API key |
 | `--openai-api-key` | | OpenAI API key |
 | `--minimax-api-key` | | MiniMax API key |
-| `--skip-browser-install` | `false` | Skip Puppeteer/Playwright install |
+| `--skip-browser-install` | `false` | Skip Playwright Chromium install |
 
 ## Usage
 
@@ -120,6 +123,8 @@ sudo ./bin/vm-ctl token my-bot
 
 # Health check
 curl -fsS http://127.0.0.1:<HOST_PORT>/health
+# If proxy health is flaky, inspect VM-side health too:
+sudo ./bin/vm-ctl status my-bot
 
 # Destroy (interactive confirmation)
 sudo ./bin/vm-ctl destroy my-bot
@@ -146,3 +151,5 @@ All scripts respect these overrides:
 | `SUBNET_CIDR` | `172.16.0.0/24` |
 | `SSH_KEY_PATH` | `~/.ssh/vmdemo_vm` |
 | `BASE_IMAGES_DIR` | `/srv/firecracker/base/images` |
+| `DISK_SIZE` | `40G` |
+| `API_SOCK` | `<FC_ROOT>/<instance>/firecracker.socket` |
