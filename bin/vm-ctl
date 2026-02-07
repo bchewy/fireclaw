@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/vm-common.sh"
+
+usage() {
+  cat <<EOF
+Usage: vm-ctl <command> [instance]
+
+Commands:
+  list
+  status [id]
+  start <id>
+  stop <id>
+  restart <id>
+  logs <id> [guest|host]
+  shell <id> [command...]
+  token <id>
+  destroy <id> [--force]
+EOF
+}
+
+ssh_run() {
+  local ip="$1"; shift
+  local key="${SSH_KEY_PATH:-$HOME/.ssh/vmdemo_vm}"
+  ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "ubuntu@$ip" "$@"
+}
+
+cmd_list() {
+  shopt -s nullglob
+  local found="false"
+  for d in "$STATE_ROOT"/.vm-*/; do
+    found="true"
+    local id
+    id="$(basename "$d" | sed 's/^\.vm-//')"
+    load_instance_env "$id"
+    local health="down"
+    curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && health="up"
+    local vm_state proxy_state
+    vm_state="$(systemctl is-active "$(vm_service "$id")" 2>/dev/null || echo inactive)"
+    proxy_state="$(systemctl is-active "$(proxy_service "$id")" 2>/dev/null || echo inactive)"
+    echo "$id ip=$VM_IP port=$HOST_PORT vm=$vm_state proxy=$proxy_state health=$health"
+  done
+  shopt -u nullglob
+  [[ "$found" == "true" ]] || echo "(no instances)"
+}
+
+cmd_status_one() {
+  local id="$1"
+  load_instance_env "$id"
+  local vm_state proxy_state health guest
+  vm_state="$(systemctl is-active "$(vm_service "$id")" 2>/dev/null || echo inactive)"
+  proxy_state="$(systemctl is-active "$(proxy_service "$id")" 2>/dev/null || echo inactive)"
+  health="down"
+  curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && health="up"
+  guest="unknown"
+  if wait_for_ssh "$VM_IP" "${SSH_KEY_PATH:-$HOME/.ssh/vmdemo_vm}" 1; then
+    guest="$(ssh_run "$VM_IP" "systemctl is-active openclaw-$id.service" 2>/dev/null || echo unknown)"
+  fi
+  echo "$id ip=$VM_IP port=$HOST_PORT vm=$vm_state proxy=$proxy_state guest=$guest health=$health"
+}
+
+cmd_status() {
+  if [[ $# -eq 1 ]]; then
+    cmd_status_one "$1"
+    return
+  fi
+  cmd_list
+}
+
+cmd_start() {
+  local id="$1"
+  require_root
+  load_instance_env "$id"
+
+  systemctl enable --now "$(vm_service "$id")"
+  wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180 || die "VM started but SSH unreachable"
+
+  ssh_run "$VM_IP" "sudo systemctl enable --now openclaw-$id.service" || warn "Guest service start failed"
+  systemctl enable --now "$(proxy_service "$id")"
+
+  cmd_status_one "$id"
+}
+
+cmd_stop() {
+  local id="$1"
+  require_root
+  load_instance_env "$id"
+
+  systemctl stop "$(proxy_service "$id")" 2>/dev/null || true
+  if wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 1; then
+    ssh_run "$VM_IP" "sudo systemctl stop openclaw-$id.service" || true
+  fi
+  systemctl stop "$(vm_service "$id")"
+  cmd_status_one "$id"
+}
+
+cmd_restart() {
+  cmd_stop "$1"
+  cmd_start "$1"
+}
+
+cmd_logs() {
+  local id="$1"
+  local mode="${2:-guest}"
+  load_instance_env "$id"
+
+  if [[ "$mode" == "host" ]]; then
+    journalctl -u "$(vm_service "$id")" -u "$(proxy_service "$id")" -f
+    return
+  fi
+
+  wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 30 || die "VM SSH unavailable"
+  ssh_run "$VM_IP" "sudo journalctl -u openclaw-$id.service -f"
+}
+
+cmd_shell() {
+  local id="$1"
+  shift || true
+  load_instance_env "$id"
+  wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 30 || die "VM SSH unavailable"
+
+  if [[ $# -gt 0 ]]; then
+    ssh_run "$VM_IP" "$*"
+  else
+    ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "ubuntu@$VM_IP"
+  fi
+}
+
+cmd_token() {
+  local id="$1"
+  cat "$(instance_token "$id")"
+}
+
+cmd_destroy() {
+  local id="$1"
+  local force="${2:-}"
+  require_root
+  load_instance_env "$id"
+
+  if [[ "$force" != "--force" ]]; then
+    read -r -p "Destroy '$id' and remove VM assets? [y/N] " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Cancelled"; return; }
+  fi
+
+  systemctl stop "$(proxy_service "$id")" 2>/dev/null || true
+  systemctl stop "$(vm_service "$id")" 2>/dev/null || true
+  systemctl disable "$(proxy_service "$id")" 2>/dev/null || true
+  systemctl disable "$(vm_service "$id")" 2>/dev/null || true
+
+  rm -f "/etc/systemd/system/$(proxy_service "$id")"
+  rm -f "/etc/systemd/system/$(vm_service "$id")"
+  systemctl daemon-reload
+
+  rm -rf "$(instance_dir "$id")" "$(fc_instance_dir "$id")"
+
+  echo "Destroyed: $id"
+}
+
+[[ $# -ge 1 ]] || { usage; exit 1; }
+
+cmd="$1"
+shift || true
+
+case "$cmd" in
+  list) cmd_list ;;
+  status) cmd_status "$@" ;;
+  start) [[ $# -eq 1 ]] || die "Usage: vm-ctl start <id>"; cmd_start "$1" ;;
+  stop) [[ $# -eq 1 ]] || die "Usage: vm-ctl stop <id>"; cmd_stop "$1" ;;
+  restart) [[ $# -eq 1 ]] || die "Usage: vm-ctl restart <id>"; cmd_restart "$1" ;;
+  logs) [[ $# -ge 1 ]] || die "Usage: vm-ctl logs <id> [guest|host]"; cmd_logs "$@" ;;
+  shell) [[ $# -ge 1 ]] || die "Usage: vm-ctl shell <id> [command...]"; id="$1"; shift; cmd_shell "$id" "$@" ;;
+  token) [[ $# -eq 1 ]] || die "Usage: vm-ctl token <id>"; cmd_token "$1" ;;
+  destroy) [[ $# -ge 1 ]] || die "Usage: vm-ctl destroy <id> [--force]"; cmd_destroy "$@" ;;
+  -h|--help|help) usage ;;
+  *) die "Unknown command: $cmd" ;;
+esac

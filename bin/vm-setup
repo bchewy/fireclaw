@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/vm-common.sh"
+
+usage() {
+  cat <<EOF
+Usage: vm-setup --instance <id> --telegram-token <token> [options]
+
+Options:
+  --telegram-users <csv>
+  --model <id>                         (default: anthropic/claude-opus-4-6)
+  --skills <csv>                       (default: github,tmux,coding-agent,session-logs,skill-creator)
+  --openclaw-image <image>
+  --vm-vcpu <n>                        (default: 4)
+  --vm-mem-mib <n>                     (default: 8192)
+  --base-kernel <path>
+  --base-rootfs <path>
+  --base-initrd <path>
+  --anthropic-api-key <key>
+  --openai-api-key <key>
+  --minimax-api-key <key>
+  --skip-browser-install
+  -h|--help
+EOF
+}
+
+INSTANCE=""
+TELEGRAM_TOKEN=""
+TELEGRAM_USERS=""
+MODEL="${MODEL:-anthropic/claude-opus-4-6}"
+SKILLS="${SKILLS:-github,tmux,coding-agent,session-logs,skill-creator}"
+OPENCLAW_IMAGE="$OPENCLAW_IMAGE_DEFAULT"
+VM_VCPU="${VM_VCPU:-4}"
+VM_MEM_MIB="${VM_MEM_MIB:-8192}"
+BASE_IMAGES_DIR="${BASE_IMAGES_DIR:-/srv/firecracker/base/images}"
+BASE_KERNEL="${BASE_KERNEL:-$BASE_IMAGES_DIR/vmlinux}"
+BASE_ROOTFS="${BASE_ROOTFS:-$BASE_IMAGES_DIR/rootfs.ext4}"
+BASE_INITRD="${BASE_INITRD:-$BASE_IMAGES_DIR/initrd.img}"
+SKIP_BROWSER_INSTALL="false"
+
+ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+MINIMAX_API_KEY="${MINIMAX_API_KEY:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --instance) INSTANCE="$2"; shift 2 ;;
+    --telegram-token) TELEGRAM_TOKEN="$2"; shift 2 ;;
+    --telegram-users) TELEGRAM_USERS="$2"; shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
+    --skills) SKILLS="$2"; shift 2 ;;
+    --openclaw-image) OPENCLAW_IMAGE="$2"; shift 2 ;;
+    --vm-vcpu) VM_VCPU="$2"; shift 2 ;;
+    --vm-mem-mib) VM_MEM_MIB="$2"; shift 2 ;;
+    --base-kernel) BASE_KERNEL="$2"; shift 2 ;;
+    --base-rootfs) BASE_ROOTFS="$2"; shift 2 ;;
+    --base-initrd) BASE_INITRD="$2"; shift 2 ;;
+    --anthropic-api-key) ANTHROPIC_API_KEY="$2"; shift 2 ;;
+    --openai-api-key) OPENAI_API_KEY="$2"; shift 2 ;;
+    --minimax-api-key) MINIMAX_API_KEY="$2"; shift 2 ;;
+    --skip-browser-install) SKIP_BROWSER_INSTALL="true"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "Unknown option: $1" ;;
+  esac
+done
+
+[[ -n "$INSTANCE" ]] || die "Missing --instance"
+[[ -n "$TELEGRAM_TOKEN" ]] || die "Missing --telegram-token"
+validate_instance_id "$INSTANCE"
+
+require_root
+for c in firecracker systemctl ip iptables openssl jq cloud-localds ssh scp socat curl; do
+  require_cmd "$c"
+done
+
+[[ -f "$BASE_KERNEL" ]] || die "Kernel not found: $BASE_KERNEL"
+[[ -f "$BASE_ROOTFS" ]] || die "Rootfs not found: $BASE_ROOTFS"
+
+ensure_root_dirs
+
+if [[ ! -f "$SSH_KEY_PATH" ]]; then
+  log "Generating SSH key: $SSH_KEY_PATH"
+  mkdir -p "$(dirname "$SSH_KEY_PATH")"
+  ssh-keygen -t ed25519 -N "" -f "$SSH_KEY_PATH" >/dev/null
+fi
+
+inst_dir="$(instance_dir "$INSTANCE")"
+fc_dir="$(fc_instance_dir "$INSTANCE")"
+[[ ! -e "$inst_dir" ]] || die "Instance already exists: $inst_dir"
+
+HOST_PORT="$(next_port)"
+VM_IP="$(next_ip)"
+VM_OCTET="${VM_IP##*.}"
+SHORT_ID="$(echo "$INSTANCE" | tr -cd 'a-z0-9' | cut -c1-6)"
+[[ -n "$SHORT_ID" ]] || SHORT_ID="vm"
+VM_TAP="t${SHORT_ID}${VM_OCTET}"
+VM_MAC="$(printf '06:fc:00:10:00:%02x' "$VM_OCTET")"
+GATEWAY_TOKEN="$(openssl rand -hex 32)"
+
+mkdir -p "$inst_dir/config" "$inst_dir/workspace"
+mkdir -p "$fc_dir/images" "$fc_dir/config" "$fc_dir/logs"
+
+cat > "$inst_dir/.env" <<EOF
+INSTANCE_ID=$INSTANCE
+HOST_PORT=$HOST_PORT
+VM_IP=$VM_IP
+VM_TAP=$VM_TAP
+VM_MAC=$VM_MAC
+GATEWAY_TOKEN=$GATEWAY_TOKEN
+MODEL=$MODEL
+SKILLS=$SKILLS
+TELEGRAM_USERS=$TELEGRAM_USERS
+OPENCLAW_IMAGE=$OPENCLAW_IMAGE
+VM_VCPU=$VM_VCPU
+VM_MEM_MIB=$VM_MEM_MIB
+SSH_KEY_PATH=$SSH_KEY_PATH
+SKIP_BROWSER_INSTALL=$SKIP_BROWSER_INSTALL
+ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
+OPENAI_API_KEY=$OPENAI_API_KEY
+MINIMAX_API_KEY=$MINIMAX_API_KEY
+EOF
+
+echo "$GATEWAY_TOKEN" > "$inst_dir/.token"
+chmod 600 "$inst_dir/.token"
+
+log "Preparing VM disk and assets"
+cp --reflink=auto "$BASE_ROOTFS" "$fc_dir/images/rootfs.ext4" 2>/dev/null || cp "$BASE_ROOTFS" "$fc_dir/images/rootfs.ext4"
+cp "$BASE_KERNEL" "$fc_dir/images/vmlinux"
+
+INITRD_PATH=""
+if [[ -f "$BASE_INITRD" ]]; then
+  cp "$BASE_INITRD" "$fc_dir/images/initrd.img"
+  INITRD_PATH="$fc_dir/images/initrd.img"
+fi
+
+SSH_PUB_KEY="$(cat "${SSH_KEY_PATH}.pub")"
+
+cat > "$fc_dir/config/user-data" <<EOF
+#cloud-config
+users:
+  - default
+  - name: ubuntu
+    groups: [sudo, docker]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - $SSH_PUB_KEY
+package_update: true
+packages:
+  - docker.io
+  - jq
+  - curl
+runcmd:
+  - [ systemctl, enable, docker ]
+  - [ systemctl, start, docker ]
+EOF
+
+cat > "$fc_dir/config/meta-data" <<EOF
+instance-id: $INSTANCE
+local-hostname: $INSTANCE
+EOF
+
+cat > "$fc_dir/config/network-config" <<EOF
+version: 2
+ethernets:
+  eth0:
+    match:
+      macaddress: "$VM_MAC"
+    set-name: eth0
+    dhcp4: false
+    addresses:
+      - $VM_IP/24
+    routes:
+      - to: 0.0.0.0/0
+        via: 172.16.0.1
+    nameservers:
+      addresses: [1.1.1.1,8.8.8.8]
+EOF
+
+cloud-localds --network-config="$fc_dir/config/network-config" "$fc_dir/images/seed.img" "$fc_dir/config/user-data" "$fc_dir/config/meta-data"
+
+jq -n \
+  --arg kernel "$fc_dir/images/vmlinux" \
+  --arg initrd "$INITRD_PATH" \
+  --arg rootfs "$fc_dir/images/rootfs.ext4" \
+  --arg seed "$fc_dir/images/seed.img" \
+  --arg tap "$VM_TAP" \
+  --arg mac "$VM_MAC" \
+  --arg log "$fc_dir/logs/firecracker.log" \
+  --argjson vcpu "$VM_VCPU" \
+  --argjson mem "$VM_MEM_MIB" '
+{
+  "boot-source": (
+    { "kernel_image_path": $kernel, "boot_args": "console=ttyS0 reboot=k panic=1 pci=off" } +
+    (if $initrd != "" then { "initrd_path": $initrd } else {} end)
+  ),
+  "drives": [
+    { "drive_id": "rootfs", "path_on_host": $rootfs, "is_root_device": true, "is_read_only": false },
+    { "drive_id": "seed", "path_on_host": $seed, "is_root_device": false, "is_read_only": true }
+  ],
+  "network-interfaces": [
+    { "iface_id": "eth0", "host_dev_name": $tap, "guest_mac": $mac }
+  ],
+  "machine-config": { "vcpu_count": $vcpu, "mem_size_mib": $mem, "smt": false },
+  "logger": { "log_path": $log, "level": "Info", "show_level": true, "show_log_origin": false }
+}
+' > "$fc_dir/config/vm-config.json"
+
+cat > "$fc_dir/start-vm.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+BRIDGE_NAME="$BRIDGE_NAME"
+BRIDGE_ADDR="$BRIDGE_ADDR"
+SUBNET_CIDR="$SUBNET_CIDR"
+VM_TAP="$VM_TAP"
+CONFIG_JSON="$fc_dir/config/vm-config.json"
+
+if ! ip link show "\$BRIDGE_NAME" >/dev/null 2>&1; then
+  ip link add "\$BRIDGE_NAME" type bridge
+fi
+ip addr add "\$BRIDGE_ADDR" dev "\$BRIDGE_NAME" 2>/dev/null || true
+ip link set "\$BRIDGE_NAME" up
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+iptables -t nat -C POSTROUTING -s "\$SUBNET_CIDR" ! -o "\$BRIDGE_NAME" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "\$SUBNET_CIDR" ! -o "\$BRIDGE_NAME" -j MASQUERADE
+
+ip tuntap add dev "\$VM_TAP" mode tap user root 2>/dev/null || true
+ip link set "\$VM_TAP" master "\$BRIDGE_NAME"
+ip link set "\$VM_TAP" up
+
+exec /usr/local/bin/firecracker --config-file "\$CONFIG_JSON"
+EOF
+chmod +x "$fc_dir/start-vm.sh"
+
+cat > "$fc_dir/stop-vm.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+VM_TAP="$VM_TAP"
+ip link set "\$VM_TAP" down 2>/dev/null || true
+ip link del "\$VM_TAP" 2>/dev/null || true
+EOF
+chmod +x "$fc_dir/stop-vm.sh"
+
+VM_SVC="$(vm_service "$INSTANCE")"
+PROXY_SVC="$(proxy_service "$INSTANCE")"
+
+cat > "/etc/systemd/system/$VM_SVC" <<EOF
+[Unit]
+Description=Firecracker VM ($INSTANCE)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$fc_dir/start-vm.sh
+ExecStop=$fc_dir/stop-vm.sh
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > "/etc/systemd/system/$PROXY_SVC" <<EOF
+[Unit]
+Description=Localhost proxy for VM ($INSTANCE)
+After=$VM_SVC
+Requires=$VM_SVC
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:$HOST_PORT,bind=127.0.0.1,reuseaddr,fork TCP:$VM_IP:18789
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now "$VM_SVC"
+
+log "Waiting for SSH on $VM_IP"
+if ! wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180; then
+  die "VM booted but SSH was not reachable"
+fi
+
+PROVISION_VARS="$inst_dir/provision.vars"
+: > "$PROVISION_VARS"
+kv() { printf "%s=%q\n" "$1" "$2" >> "$PROVISION_VARS"; }
+
+kv INSTANCE_ID "$INSTANCE"
+kv TELEGRAM_TOKEN "$TELEGRAM_TOKEN"
+kv TELEGRAM_USERS "$TELEGRAM_USERS"
+kv MODEL "$MODEL"
+kv SKILLS "$SKILLS"
+kv GATEWAY_TOKEN "$GATEWAY_TOKEN"
+kv OPENCLAW_IMAGE "$OPENCLAW_IMAGE"
+kv SKIP_BROWSER_INSTALL "$SKIP_BROWSER_INSTALL"
+kv ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
+kv OPENAI_API_KEY "$OPENAI_API_KEY"
+kv MINIMAX_API_KEY "$MINIMAX_API_KEY"
+
+[[ -f "$REPO_ROOT/scripts/provision-guest.sh" ]] || die "Missing: $REPO_ROOT/scripts/provision-guest.sh"
+
+scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+  "$REPO_ROOT/scripts/provision-guest.sh" "ubuntu@$VM_IP:/tmp/provision-guest.sh"
+scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+  "$PROVISION_VARS" "ubuntu@$VM_IP:/tmp/provision.vars"
+
+ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+  "ubuntu@$VM_IP" "sudo bash /tmp/provision-guest.sh /tmp/provision.vars"
+
+systemctl enable --now "$PROXY_SVC"
+
+health_ok="false"
+for _ in {1..30}; do
+  if curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1; then
+    health_ok="true"
+    break
+  fi
+  sleep 2
+done
+
+echo "✓ VM instance configured"
+echo "  Instance: $INSTANCE"
+echo "  VM IP:    $VM_IP"
+echo "  Port:     $HOST_PORT"
+echo "  Token:    $GATEWAY_TOKEN"
+if [[ "$health_ok" != "true" ]]; then
+  echo "  Health:   pending (service may still be warming up)"
+fi
+echo "  Status:   $(systemctl is-active "$VM_SVC") / $(systemctl is-active "$PROXY_SVC")"
