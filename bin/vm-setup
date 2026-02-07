@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 source "$SCRIPT_DIR/vm-common.sh"
+
+CMD_NAME="${VM_SETUP_CMD_NAME:-fireclaw setup}"
 
 usage() {
   cat <<EOF
-Usage: vm-setup --instance <id> --telegram-token <token> [options]
+Usage: $CMD_NAME --instance <id> --telegram-token <token> [options]
 
 Options:
   --telegram-users <csv>
@@ -157,11 +159,11 @@ SSH_PUB_KEY="$(cat "${SSH_KEY_PATH}.pub")"
 cat > "$fc_dir/config/user-data" <<EOF
 #cloud-config
 users:
-  - default
   - name: ubuntu
     groups: [sudo, docker]
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
     ssh_authorized_keys:
       - $SSH_PUB_KEY
 package_update: true

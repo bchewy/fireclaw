@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+source "$SCRIPT_DIR/vm-common.sh"
+
+usage() {
+  cat <<EOF
+Usage: fireclaw provision <instance>
+EOF
+}
+
+[[ $# -eq 1 ]] || { usage; exit 1; }
+
+INSTANCE="$1"
+validate_instance_id "$INSTANCE"
+require_root
+
+load_instance_env "$INSTANCE"
+
+PROVISION_VARS="$(instance_dir "$INSTANCE")/provision.vars"
+[[ -f "$PROVISION_VARS" ]] || die "Missing provision vars: $PROVISION_VARS"
+[[ -f "$REPO_ROOT/scripts/provision-guest.sh" ]] || die "Missing: $REPO_ROOT/scripts/provision-guest.sh"
+
+if ! wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180; then
+  die "VM SSH unreachable. Start it first: fireclaw start $INSTANCE"
+fi
+
+scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+  "$REPO_ROOT/scripts/provision-guest.sh" "ubuntu@$VM_IP:/tmp/provision-guest.sh"
+scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+  "$PROVISION_VARS" "ubuntu@$VM_IP:/tmp/provision.vars"
+
+ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+  "ubuntu@$VM_IP" "sudo bash /tmp/provision-guest.sh /tmp/provision.vars"
+
+systemctl enable --now "$(proxy_service "$INSTANCE")" >/dev/null 2>&1 || true
+
+health_ok="false"
+for _ in {1..30}; do
+  if curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1; then
+    health_ok="true"
+    break
+  fi
+  sleep 2
+done
+
+echo "✓ VM provisioning complete"
+echo "  Instance: $INSTANCE"
+echo "  VM IP:    $VM_IP"
+echo "  Port:     $HOST_PORT"
+if [[ "$health_ok" != "true" ]]; then
+  echo "  Health:   pending (service may still be warming up)"
+fi

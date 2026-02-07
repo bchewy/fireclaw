@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-STATE_ROOT="${STATE_ROOT:-$REPO_ROOT/.vm-demo}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
 FC_ROOT="${FC_ROOT:-/srv/firecracker/vm-demo}"
+STATE_ROOT="${STATE_ROOT:-/var/lib/fireclaw}"
 BASE_PORT="${BASE_PORT:-18890}"
 
 BRIDGE_NAME="${BRIDGE_NAME:-fcbr0}"

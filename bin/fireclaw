@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+usage() {
+  cat <<'EOF'
+Usage: fireclaw <command> [args...]
+
+Primary commands:
+  setup <flags...>                    Create and provision a new VM instance
+  list                                List instances
+  status [id]                         Show instance status
+  start <id>                          Start instance
+  stop <id>                           Stop instance
+  restart <id>                        Restart instance
+  logs <id> [guest|host]              Stream logs
+  shell <id> [command...]             SSH shell or run command in VM
+  token <id>                          Show gateway token
+  destroy <id> [--force]              Destroy instance
+
+Compatibility commands:
+  ctl <vm-ctl-args...>                Pass through to vm-ctl
+  vm-setup <flags...>                 Pass through to vm-setup
+  vm-ctl <args...>                    Pass through to vm-ctl
+
+Examples:
+  sudo fireclaw setup --instance my-bot --telegram-token <token> --telegram-users <uid>
+  sudo fireclaw list
+  sudo fireclaw status my-bot
+EOF
+}
+
+[[ $# -ge 1 ]] || {
+  usage
+  exit 1
+}
+
+cmd="$1"
+shift || true
+
+case "$cmd" in
+  setup|create|provision)
+    VM_SETUP_CMD_NAME="fireclaw setup" exec "$SCRIPT_DIR/vm-setup" "$@"
+    ;;
+  list|status|start|stop|restart|logs|shell|token|destroy)
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
+      VM_CTL_CMD_NAME="fireclaw" exec "$SCRIPT_DIR/vm-ctl" --help
+    fi
+    VM_CTL_CMD_NAME="fireclaw" exec "$SCRIPT_DIR/vm-ctl" "$cmd" "$@"
+    ;;
+  ctl|vm-ctl)
+    VM_CTL_CMD_NAME="fireclaw ctl" exec "$SCRIPT_DIR/vm-ctl" "$@"
+    ;;
+  vm-setup)
+    VM_SETUP_CMD_NAME="fireclaw vm-setup" exec "$SCRIPT_DIR/vm-setup" "$@"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    echo "Error: unknown command '$cmd'" >&2
+    usage
+    exit 1
+    ;;
+esac

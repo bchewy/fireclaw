@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 source "$SCRIPT_DIR/vm-common.sh"
+
+CMD_NAME="${VM_CTL_CMD_NAME:-fireclaw}"
 
 usage() {
   cat <<EOF
-Usage: vm-ctl <command> [instance]
+Usage: $CMD_NAME <command> [instance]
 
 Commands:
   list
@@ -195,13 +197,13 @@ shift || true
 case "$cmd" in
   list) cmd_list ;;
   status) cmd_status "$@" ;;
-  start) [[ $# -eq 1 ]] || die "Usage: vm-ctl start <id>"; cmd_start "$1" ;;
-  stop) [[ $# -eq 1 ]] || die "Usage: vm-ctl stop <id>"; cmd_stop "$1" ;;
-  restart) [[ $# -eq 1 ]] || die "Usage: vm-ctl restart <id>"; cmd_restart "$1" ;;
-  logs) [[ $# -ge 1 ]] || die "Usage: vm-ctl logs <id> [guest|host]"; cmd_logs "$@" ;;
-  shell) [[ $# -ge 1 ]] || die "Usage: vm-ctl shell <id> [command...]"; id="$1"; shift; cmd_shell "$id" "$@" ;;
-  token) [[ $# -eq 1 ]] || die "Usage: vm-ctl token <id>"; cmd_token "$1" ;;
-  destroy) [[ $# -ge 1 ]] || die "Usage: vm-ctl destroy <id> [--force]"; cmd_destroy "$@" ;;
+  start) [[ $# -eq 1 ]] || die "Usage: $CMD_NAME start <id>"; cmd_start "$1" ;;
+  stop) [[ $# -eq 1 ]] || die "Usage: $CMD_NAME stop <id>"; cmd_stop "$1" ;;
+  restart) [[ $# -eq 1 ]] || die "Usage: $CMD_NAME restart <id>"; cmd_restart "$1" ;;
+  logs) [[ $# -ge 1 ]] || die "Usage: $CMD_NAME logs <id> [guest|host]"; cmd_logs "$@" ;;
+  shell) [[ $# -ge 1 ]] || die "Usage: $CMD_NAME shell <id> [command...]"; id="$1"; shift; cmd_shell "$id" "$@" ;;
+  token) [[ $# -eq 1 ]] || die "Usage: $CMD_NAME token <id>"; cmd_token "$1" ;;
+  destroy) [[ $# -ge 1 ]] || die "Usage: $CMD_NAME destroy <id> [--force]"; cmd_destroy "$@" ;;
   -h|--help|help) usage ;;
   *) die "Unknown command: $cmd" ;;
 esac
