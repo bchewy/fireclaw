@@ -6,7 +6,7 @@ FC_ROOT="${FC_ROOT:-/srv/firecracker/vm-demo}"
 STATE_ROOT="${STATE_ROOT:-/var/lib/fireclaw}"
 BASE_PORT="${BASE_PORT:-18890}"
 
-BRIDGE_NAME="${BRIDGE_NAME:-fcbr0}"
+BRIDGE_NAME="${BRIDGE_NAME:-fc-br0}"
 BRIDGE_ADDR="${BRIDGE_ADDR:-172.16.0.1/24}"
 SUBNET_CIDR="${SUBNET_CIDR:-172.16.0.0/24}"
 

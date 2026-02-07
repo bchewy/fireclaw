@@ -9,7 +9,7 @@ fireclaw is a bash + systemd CLI that provisions and manages OpenClaw AI agent i
 The system has three layers:
 
 1. Host layer: systemd services manage Firecracker VM processes and socat localhost proxies.
-2. Network layer: A Linux bridge (fcbr0, 172.16.0.0/24) connects all VMs. Host NATs outbound traffic. Each VM gets a static IP. A socat proxy on the host forwards localhost:<port> to VM:18789, keeping the OpenClaw API localhost-only.
+2. Network layer: A Linux bridge (fc-br0, 172.16.0.0/24) connects all VMs. Host NATs outbound traffic. Each VM gets a static IP. A socat proxy on the host forwards localhost:<port> to VM:18789, keeping the OpenClaw API localhost-only.
 3. Guest layer: Each VM runs cloud-init on boot, waits for apt locks, expands ext4 rootfs, configures Docker for Firecracker networking, pulls the OpenClaw container image, configures it via CLI, installs Playwright Chromium, and starts the OpenClaw gateway as a systemd service.
 
 State is split between /var/lib/fireclaw/.vm-<id>/ (env, tokens, provision vars) and /srv/firecracker/vm-demo/<id>/ (VM images, Firecracker config, logs).

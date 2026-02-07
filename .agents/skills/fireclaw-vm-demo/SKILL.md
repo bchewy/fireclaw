@@ -17,7 +17,7 @@ Firecracker microVM control plane for isolated OpenClaw instances. Each instance
 Host
 ├── systemd: firecracker-vmdemo-<id>.service   (Firecracker VM process)
 ├── systemd: vmdemo-proxy-<id>.service          (socat: localhost:<port> → VM:18789)
-├── bridge: fcbr0 (172.16.0.0/24)
+├── bridge: fc-br0 (172.16.0.0/24)
 │
 └── Firecracker VM (172.16.0.x)
     ├── cloud-init → ubuntu user, SSH key, Docker
@@ -107,7 +107,7 @@ If an instance is unhealthy:
 | `STATE_ROOT` | `/var/lib/fireclaw` |
 | `FC_ROOT` | `/srv/firecracker/vm-demo` |
 | `BASE_PORT` | `18890` |
-| `BRIDGE_NAME` | `fcbr0` |
+| `BRIDGE_NAME` | `fc-br0` |
 | `BRIDGE_ADDR` | `172.16.0.1/24` |
 | `SUBNET_CIDR` | `172.16.0.0/24` |
 | `SSH_KEY_PATH` | `~/.ssh/vmdemo_vm` |
