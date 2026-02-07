@@ -19,7 +19,7 @@ This repo is a minimal control plane that wires up Firecracker VM lifecycle, net
 Host
 ├── systemd: firecracker-vmdemo-<id>.service   ← runs the VM
 ├── systemd: vmdemo-proxy-<id>.service          ← socat: localhost:<port> → VM:18789
-├── bridge: fcbr0 (172.16.0.0/24)              ← shared bridge for all VMs
+├── bridge: fc-br0 (172.16.0.0/24)              ← shared bridge for all VMs
 │
 └── Firecracker VM (172.16.0.x)
     ├── cloud-init: ubuntu user, SSH key, Docker install
@@ -129,7 +129,7 @@ sudo fireclaw destroy my-bot --force
 
 ## Networking
 
-Each VM gets a static IP on a bridge (`fcbr0`, `172.16.0.0/24`). The host acts as the gateway at `172.16.0.1` with NAT for outbound traffic. A `socat` proxy on the host forwards `127.0.0.1:<HOST_PORT>` to the VM's gateway port (`18789`), so the OpenClaw API is only reachable from localhost.
+Each VM gets a static IP on a bridge (`fc-br0`, `172.16.0.0/24`). The host acts as the gateway at `172.16.0.1` with NAT for outbound traffic. A `socat` proxy on the host forwards `127.0.0.1:<HOST_PORT>` to the VM's gateway port (`18789`), so the OpenClaw API is only reachable from localhost.
 
 ## Environment variables
 
@@ -140,7 +140,7 @@ All scripts respect these overrides:
 | `STATE_ROOT` | `/var/lib/fireclaw` |
 | `FC_ROOT` | `/srv/firecracker/vm-demo` |
 | `BASE_PORT` | `18890` |
-| `BRIDGE_NAME` | `fcbr0` |
+| `BRIDGE_NAME` | `fc-br0` |
 | `BRIDGE_ADDR` | `172.16.0.1/24` |
 | `SUBNET_CIDR` | `172.16.0.0/24` |
 | `SSH_KEY_PATH` | `~/.ssh/vmdemo_vm` |
