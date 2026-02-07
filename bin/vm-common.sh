@@ -37,6 +37,7 @@ proxy_service()     { printf 'vmdemo-proxy-%s.service\n' "$1"; }
 
 load_instance_env() {
   local id="$1"
+  validate_instance_id "$id"
   local f
   f="$(instance_env "$id")"
   [[ -f "$f" ]] || die "instance '$id' not found"

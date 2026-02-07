@@ -18,6 +18,11 @@ require SKILLS
 require GATEWAY_TOKEN
 require OPENCLAW_IMAGE
 
+[[ "$INSTANCE_ID" =~ ^[a-z0-9_-]+$ ]] || {
+  echo "INSTANCE_ID must match [a-z0-9_-]+" >&2
+  exit 1
+}
+
 CONFIG_ROOT="/home/ubuntu/.openclaw-${INSTANCE_ID}"
 CONFIG_DIR="$CONFIG_ROOT/config"
 WORKSPACE_DIR="/home/ubuntu/openclaw-${INSTANCE_ID}/workspace"
@@ -53,10 +58,15 @@ chmod 600 "$ENV_FILE"
 docker pull "$OPENCLAW_IMAGE"
 
 run_openclaw_cli() {
-  local script="$1"
-  docker run --rm -T \
+  docker run --rm -i -T \
     -e HOME=/home/node \
     -e OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" \
+    -e OPENCLAW_TELEGRAM_TOKEN="$TELEGRAM_TOKEN" \
+    -e OPENCLAW_MODEL="$MODEL" \
+    -e OPENCLAW_TELEGRAM_ALLOW_FROM_JSON="$telegram_allow_from_json" \
+    -e OPENCLAW_SKILLS_JSON="$skills_json" \
+    -e OPENCLAW_BROWSER_PATH="${OPENCLAW_BROWSER_PATH:-}" \
+    -e OPENCLAW_MINIMAX_PROVIDER_JSON="${OPENCLAW_MINIMAX_PROVIDER_JSON:-}" \
     -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
     -e OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
     -e MINIMAX_API_KEY="${MINIMAX_API_KEY:-}" \
@@ -64,7 +74,7 @@ run_openclaw_cli() {
     -v "$WORKSPACE_DIR:/home/node/.openclaw/workspace" \
     -v "$TOOLS_DIR:/home/node/clawd/tools" \
     --entrypoint /bin/bash \
-    "$OPENCLAW_IMAGE" -lc "$script"
+    "$OPENCLAW_IMAGE" -se
 }
 
 skills_json="[]"
@@ -79,36 +89,48 @@ if (( ${#users_arr[@]} > 0 )); then
   telegram_allow_from_json="$(printf '%s\n' "${users_arr[@]}" | sed '/^$/d' | jq -R . | jq -s .)"
 fi
 
-run_openclaw_cli "
-set -e
+run_openclaw_cli <<'EOF'
+set -euo pipefail
 OPENCLAW='node /app/openclaw.mjs'
-\$OPENCLAW config set gateway.mode local
-\$OPENCLAW config set gateway.bind lan
-\$OPENCLAW config set gateway.auth.mode token
-\$OPENCLAW config set gateway.auth.token '$GATEWAY_TOKEN'
-\$OPENCLAW config set gateway.tailscale.mode off
-\$OPENCLAW config set agents.defaults.model.primary '$MODEL'
-\$OPENCLAW config set agents.defaults.skipBootstrap false --json
-\$OPENCLAW config set channels.telegram.enabled true --json
-\$OPENCLAW config set channels.telegram.botToken '$TELEGRAM_TOKEN'
-\$OPENCLAW config set channels.telegram.dmPolicy allowlist
-\$OPENCLAW config set channels.telegram.groupPolicy disabled
-\$OPENCLAW config set channels.telegram.allowFrom '$telegram_allow_from_json' --json
-\$OPENCLAW config set plugins.entries.telegram.enabled true --json
-\$OPENCLAW config set skills.allowBundled '$skills_json' --json
-"
+$OPENCLAW config set gateway.mode local
+$OPENCLAW config set gateway.bind lan
+$OPENCLAW config set gateway.auth.mode token
+$OPENCLAW config set gateway.auth.token "$OPENCLAW_GATEWAY_TOKEN"
+$OPENCLAW config set gateway.tailscale.mode off
+$OPENCLAW config set agents.defaults.model.primary "$OPENCLAW_MODEL"
+$OPENCLAW config set agents.defaults.skipBootstrap false --json
+$OPENCLAW config set channels.telegram.enabled true --json
+$OPENCLAW config set channels.telegram.botToken "$OPENCLAW_TELEGRAM_TOKEN"
+$OPENCLAW config set channels.telegram.dmPolicy allowlist
+$OPENCLAW config set channels.telegram.groupPolicy disabled
+$OPENCLAW config set channels.telegram.allowFrom "$OPENCLAW_TELEGRAM_ALLOW_FROM_JSON" --json
+$OPENCLAW config set plugins.entries.telegram.enabled true --json
+$OPENCLAW config set skills.allowBundled "$OPENCLAW_SKILLS_JSON" --json
+EOF
 
 if [[ "$MODEL" == minimax/* ]]; then
-  run_openclaw_cli "
-  OPENCLAW='node /app/openclaw.mjs'
-  \$OPENCLAW config set models.mode merge
-  \$OPENCLAW config set models.providers.minimax '{
-    \"baseUrl\":\"https://api.minimax.io/anthropic\",
-    \"apiKey\":\"${MINIMAX_API_KEY:-}\",
-    \"api\":\"anthropic-messages\",
-    \"models\":[{\"id\":\"MiniMax-M2.1\",\"name\":\"MiniMax M2.1\",\"reasoning\":false,\"input\":[\"text\"],\"contextWindow\":200000,\"maxTokens\":8192}]
-  }' --json
-  "
+  OPENCLAW_MINIMAX_PROVIDER_JSON="$(jq -cn --arg api_key "${MINIMAX_API_KEY:-}" '
+    {
+      baseUrl: "https://api.minimax.io/anthropic",
+      apiKey: $api_key,
+      api: "anthropic-messages",
+      models: [
+        {
+          id: "MiniMax-M2.1",
+          name: "MiniMax M2.1",
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 200000,
+          maxTokens: 8192
+        }
+      ]
+    }
+  ')"
+  run_openclaw_cli <<'EOF'
+OPENCLAW='node /app/openclaw.mjs'
+$OPENCLAW config set models.mode merge
+$OPENCLAW config set models.providers.minimax "$OPENCLAW_MINIMAX_PROVIDER_JSON" --json
+EOF
 fi
 
 if [[ "${SKIP_BROWSER_INSTALL:-false}" != "true" ]]; then
@@ -126,10 +148,11 @@ if [[ "${SKIP_BROWSER_INSTALL:-false}" != "true" ]]; then
   chrome_host_path="$(find "$TOOLS_DIR/.puppeteer-cache" -type f -name chrome-headless-shell | head -n 1 || true)"
   if [[ -n "$chrome_host_path" ]]; then
     chrome_container_path="${chrome_host_path/#$TOOLS_DIR/\/home\/node\/clawd\/tools}"
-    run_openclaw_cli "
-    OPENCLAW='node /app/openclaw.mjs'
-    \$OPENCLAW config set browser.executablePath '$chrome_container_path'
-    "
+    OPENCLAW_BROWSER_PATH="$chrome_container_path"
+    run_openclaw_cli <<'EOF'
+OPENCLAW='node /app/openclaw.mjs'
+$OPENCLAW config set browser.executablePath "$OPENCLAW_BROWSER_PATH"
+EOF
   fi
 fi
 
