@@ -11,7 +11,7 @@ BRIDGE_ADDR="${BRIDGE_ADDR:-172.16.0.1/24}"
 SUBNET_CIDR="${SUBNET_CIDR:-172.16.0.0/24}"
 
 OPENCLAW_IMAGE_DEFAULT="${OPENCLAW_IMAGE_DEFAULT:-ghcr.io/openclaw/openclaw:latest}"
-SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/vmdemo_vm}"
+SSH_KEY_PATH="${SSH_KEY_PATH:-/home/ubuntu/.ssh/vmdemo_vm}"
 
 log()  { printf '==> %s\n' "$*"; }
 warn() { printf 'Warning: %s\n' "$*" >&2; }
@@ -96,14 +96,30 @@ wait_for_ssh() {
   local ip="$1"
   local key="${2:-$SSH_KEY_PATH}"
   local retries="${3:-120}"
+
+  if [[ ! -r "$key" ]]; then
+    if [[ $EUID -ne 0 ]]; then
+      die "Cannot read SSH key: $key (try: sudo fireclaw ...)"
+    else
+      die "SSH key not found: $key"
+    fi
+  fi
+
+  local vm_svc vm_state
+  vm_svc="$(vm_service "${INSTANCE_ID:-}")"
+
   local i
   for ((i=1; i<=retries; i++)); do
     if ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 "ubuntu@$ip" true >/dev/null 2>&1; then
       return 0
     fi
+    vm_state="$(systemctl is-active "$vm_svc" 2>/dev/null)" || vm_state="inactive"
+    if [[ "$vm_state" != "active" ]]; then
+      die "VM is not running ($(printf '\033[31m%s\033[0m' "$vm_state")). Start it with: sudo fireclaw start ${INSTANCE_ID:-<id>}"
+    fi
     sleep 2
   done
-  return 1
+  die "VM is running but SSH did not become reachable at ubuntu@$ip after $((retries * 2))s"
 }
 
 check_guest_health() {
