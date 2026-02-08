@@ -1,6 +1,6 @@
 {
   "name": "fireclaw",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Firecracker microVM control plane for isolated OpenClaw instances",
   "bin": {
     "fireclaw": "bin/fireclaw"
