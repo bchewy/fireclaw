@@ -4,30 +4,32 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
 usage() {
-  cat <<'EOF'
-Usage: fireclaw <command> [args...]
+  local bold=$'\033[1m' dim=$'\033[2m' reset=$'\033[0m' cyan=$'\033[36m'
 
-Primary commands:
-  setup <flags...>                    Create and provision a new VM instance
-  list                                List instances
-  status [id]                         Show instance status
-  start <id>                          Start instance
-  stop <id>                           Stop instance
-  restart <id>                        Restart instance
-  logs <id> [guest|host]              Stream logs
-  shell <id> [command...]             SSH shell or run command in VM
-  token <id>                          Show gateway token
-  destroy <id> [--force]              Destroy instance
+  cat <<EOF
+${bold}fireclaw${reset} — Firecracker microVM control plane
 
-Compatibility commands:
-  ctl <vm-ctl-args...>                Pass through to vm-ctl
-  vm-setup <flags...>                 Pass through to vm-setup
-  vm-ctl <args...>                    Pass through to vm-ctl
+${bold}USAGE${reset}
+  fireclaw <command> [args...]
 
-Examples:
-  sudo fireclaw setup --instance my-bot --telegram-token <token> --telegram-users <uid>
-  sudo fireclaw list
-  sudo fireclaw status my-bot
+${bold}COMMANDS${reset}
+  ${cyan}setup${reset} <flags...>             Create and provision a new VM instance
+  ${cyan}list${reset}                         List all instances
+  ${cyan}status${reset} [id]                  Show instance status (all or one)
+  ${cyan}start${reset} <id>                   Start an instance
+  ${cyan}stop${reset} <id>                    Stop an instance
+  ${cyan}restart${reset} <id>                 Restart an instance
+  ${cyan}logs${reset} <id> [guest|host]       Stream logs
+  ${cyan}shell${reset} <id> [command...]      SSH into VM or run a command
+  ${cyan}token${reset} <id>                   Print gateway token
+  ${cyan}destroy${reset} <id> [--force]       Destroy an instance
+
+${bold}EXAMPLES${reset}
+  ${dim}\$${reset} sudo fireclaw setup --instance my-bot --telegram-token <tok> --telegram-users <uid>
+  ${dim}\$${reset} sudo fireclaw list
+  ${dim}\$${reset} sudo fireclaw status my-bot
+  ${dim}\$${reset} sudo fireclaw shell my-bot
+  ${dim}\$${reset} sudo fireclaw logs my-bot guest
 EOF
 }
 

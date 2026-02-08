@@ -29,11 +29,45 @@ ssh_run() {
   ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "ubuntu@$ip" "$@"
 }
 
+_color() {
+  local val="$1"
+  local green=$'\033[32m' red=$'\033[31m' yellow=$'\033[33m' reset=$'\033[0m'
+  case "$val" in
+    active|up)       printf '%s%s%s' "$green"  "$val" "$reset" ;;
+    inactive|down)   printf '%s%s%s' "$red"    "$val" "$reset" ;;
+    failed)          printf '%s%s%s' "$red"    "$val" "$reset" ;;
+    *)               printf '%s%s%s' "$yellow" "$val" "$reset" ;;
+  esac
+}
+
+_print_status_table() {
+  local -a ids=() ips=() ports=() vms=() proxies=() healths=()
+  local id ip port vm proxy health
+
+  while IFS='|' read -r id ip port vm proxy health; do
+    ids+=("$id"); ips+=("$ip"); ports+=("$port")
+    vms+=("$vm"); proxies+=("$proxy"); healths+=("$health")
+  done
+
+  [[ ${#ids[@]} -gt 0 ]] || { echo "(no instances)"; return; }
+
+  local hdr=$'\033[1;37m' reset=$'\033[0m' dim=$'\033[2m'
+  printf "${hdr}%-14s %-14s %-7s %-10s %-10s %-8s${reset}\n" \
+    "INSTANCE" "IP" "PORT" "VM" "PROXY" "HEALTH"
+  printf "${dim}%-14s %-14s %-7s %-10s %-10s %-8s${reset}\n" \
+    "--------" "----------" "-----" "------" "-------" "------"
+
+  for i in "${!ids[@]}"; do
+    printf "%-14s %-14s %-7s %-10b %-10b %-8b\n" \
+      "${ids[$i]}" "${ips[$i]}" "${ports[$i]}" \
+      "$(_color "${vms[$i]}")" "$(_color "${proxies[$i]}")" "$(_color "${healths[$i]}")"
+  done
+}
+
 cmd_list() {
   shopt -s nullglob
-  local found="false"
+  local rows=()
   for d in "$STATE_ROOT"/.vm-*/; do
-    found="true"
     local id
     id="$(basename "$d" | sed 's/^\.vm-//')"
     if [[ ! "$id" =~ ^[a-z0-9_-]+$ ]]; then
@@ -53,12 +87,12 @@ cmd_list() {
       health="up"
     fi
     local vm_state proxy_state
-    vm_state="$(systemctl is-active "$(vm_service "$id")" 2>/dev/null || echo inactive)"
-    proxy_state="$(systemctl is-active "$(proxy_service "$id")" 2>/dev/null || echo inactive)"
-    echo "$id ip=$VM_IP port=$HOST_PORT vm=$vm_state proxy=$proxy_state health=$health host_health=$host_health guest_health=$guest_health"
+    vm_state="$(systemctl is-active "$(vm_service "$id")" 2>/dev/null)" || vm_state="inactive"
+    proxy_state="$(systemctl is-active "$(proxy_service "$id")" 2>/dev/null)" || proxy_state="inactive"
+    rows+=("${id}|${VM_IP}|${HOST_PORT}|${vm_state}|${proxy_state}|${health}")
   done
   shopt -u nullglob
-  [[ "$found" == "true" ]] || echo "(no instances)"
+  printf '%s\n' "${rows[@]}" | _print_status_table
 }
 
 cmd_status_one() {
@@ -67,15 +101,15 @@ cmd_status_one() {
   load_instance_env "$id"
   local ssh_key="${SSH_KEY_PATH:-$HOME/.ssh/vmdemo_vm}"
   local vm_state proxy_state health host_health guest_health guest
-  vm_state="$(systemctl is-active "$(vm_service "$id")" 2>/dev/null || echo inactive)"
-  proxy_state="$(systemctl is-active "$(proxy_service "$id")" 2>/dev/null || echo inactive)"
+  vm_state="$(systemctl is-active "$(vm_service "$id")" 2>/dev/null)" || vm_state="inactive"
+  proxy_state="$(systemctl is-active "$(proxy_service "$id")" 2>/dev/null)" || proxy_state="inactive"
   health="down"
   host_health="down"
   guest_health="down"
   curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && host_health="up"
   guest="unknown"
   if wait_for_ssh "$VM_IP" "$ssh_key" 1; then
-    guest="$(ssh_run "$VM_IP" "systemctl is-active openclaw-$id.service" 2>/dev/null || echo unknown)"
+    guest="$(ssh_run "$VM_IP" "systemctl is-active openclaw-$id.service" 2>/dev/null)" || guest="unknown"
     if check_guest_health "$id" "$VM_IP" "$ssh_key"; then
       guest_health="up"
     fi
@@ -83,7 +117,17 @@ cmd_status_one() {
   if [[ "$host_health" == "up" || "$guest_health" == "up" ]]; then
     health="up"
   fi
-  echo "$id ip=$VM_IP port=$HOST_PORT vm=$vm_state proxy=$proxy_state guest=$guest health=$health host_health=$host_health guest_health=$guest_health"
+
+  local bold=$'\033[1m' dim=$'\033[2m' reset=$'\033[0m'
+  printf "${bold}%s${reset}\n" "$id"
+  printf "  %-16s %s\n" "IP" "$VM_IP"
+  printf "  %-16s %s\n" "Proxy port" "$HOST_PORT"
+  printf "  %-16s %b\n" "VM" "$(_color "$vm_state")"
+  printf "  %-16s %b\n" "Proxy" "$(_color "$proxy_state")"
+  printf "  %-16s %b\n" "Guest service" "$(_color "$guest")"
+  printf "  %-16s %b\n" "Health" "$(_color "$health")"
+  printf "  %-16s %b\n" "  Host health" "$(_color "$host_health")"
+  printf "  %-16s %b\n" "  Guest health" "$(_color "$guest_health")"
 }
 
 cmd_status() {
