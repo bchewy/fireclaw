@@ -22,7 +22,7 @@ PROVISION_VARS="$(instance_dir "$INSTANCE")/provision.vars"
 [[ -f "$PROVISION_VARS" ]] || die "Missing provision vars: $PROVISION_VARS"
 [[ -f "$REPO_ROOT/scripts/provision-guest.sh" ]] || die "Missing: $REPO_ROOT/scripts/provision-guest.sh"
 
-if ! wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180; then
+if ! wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180 "$INSTANCE"; then
   die "VM SSH unreachable. Start it first: fireclaw start $INSTANCE"
 fi
 

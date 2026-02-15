@@ -96,6 +96,8 @@ wait_for_ssh() {
   local ip="$1"
   local key="${2:-$SSH_KEY_PATH}"
   local retries="${3:-120}"
+  local instance_id="${4:-${INSTANCE_ID:-}}"
+  local vm_svc=""
 
   if [[ ! -r "$key" ]]; then
     if [[ $EUID -ne 0 ]]; then
@@ -105,17 +107,22 @@ wait_for_ssh() {
     fi
   fi
 
-  local vm_svc vm_state
-  vm_svc="$(vm_service "${INSTANCE_ID:-}")"
+  if [[ -n "$instance_id" ]]; then
+    vm_svc="$(vm_service "$instance_id")"
+  fi
+
+  local vm_state
 
   local i
   for ((i=1; i<=retries; i++)); do
     if ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 "ubuntu@$ip" true >/dev/null 2>&1; then
       return 0
     fi
-    vm_state="$(systemctl is-active "$vm_svc" 2>/dev/null)" || vm_state="inactive"
-    if [[ "$vm_state" != "active" ]]; then
-      die "VM is not running ($(printf '\033[31m%s\033[0m' "$vm_state")). Start it with: sudo fireclaw start ${INSTANCE_ID:-<id>}"
+    if [[ -n "$vm_svc" ]]; then
+      vm_state="$(systemctl is-active "$vm_svc" 2>/dev/null)" || vm_state="inactive"
+      if [[ "$vm_state" != "active" ]]; then
+        die "VM is not running ($(printf '\033[31m%s\033[0m' "$vm_state")). Start it with: sudo fireclaw start $instance_id"
+      fi
     fi
     sleep 2
   done
