@@ -108,7 +108,7 @@ cmd_status_one() {
   guest_health="down"
   curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && host_health="up"
   guest="unknown"
-  if wait_for_ssh "$VM_IP" "$ssh_key" 1; then
+  if wait_for_ssh "$VM_IP" "$ssh_key" 1 "$id"; then
     guest="$(ssh_run "$VM_IP" "systemctl is-active openclaw-$id.service" 2>/dev/null)" || guest="unknown"
     if check_guest_health "$id" "$VM_IP" "$ssh_key"; then
       guest_health="up"
@@ -145,7 +145,7 @@ cmd_start() {
   load_instance_env "$id"
 
   systemctl enable --now "$(vm_service "$id")"
-  wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180 || die "VM started but SSH unreachable"
+  wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180 "$id" || die "VM started but SSH unreachable"
 
   ssh_run "$VM_IP" "sudo systemctl enable --now openclaw-$id.service" || warn "Guest service start failed"
   systemctl enable --now "$(proxy_service "$id")"
@@ -160,7 +160,7 @@ cmd_stop() {
   load_instance_env "$id"
 
   systemctl stop "$(proxy_service "$id")" 2>/dev/null || true
-  if wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 1; then
+  if wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 1 "$id"; then
     ssh_run "$VM_IP" "sudo systemctl stop openclaw-$id.service" || true
   fi
   systemctl stop "$(vm_service "$id")"
@@ -183,7 +183,7 @@ cmd_logs() {
     return
   fi
 
-  wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 30 || die "VM SSH unavailable"
+  wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 30 "$id" || die "VM SSH unavailable"
   ssh_run "$VM_IP" "sudo journalctl -u openclaw-$id.service -f"
 }
 
@@ -192,7 +192,7 @@ cmd_shell() {
   shift || true
   validate_instance_id "$id"
   load_instance_env "$id"
-  wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 30 || die "VM SSH unavailable"
+  wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 30 "$id" || die "VM SSH unavailable"
 
   if [[ $# -gt 0 ]]; then
     ssh_run "$VM_IP" "$*"

@@ -304,7 +304,7 @@ systemctl daemon-reload
 systemctl enable --now "$VM_SVC"
 
 log "Waiting for SSH on $VM_IP"
-if ! wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180; then
+if ! wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180 "$INSTANCE"; then
   die "VM booted but SSH was not reachable"
 fi
 
