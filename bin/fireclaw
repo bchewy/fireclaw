@@ -14,6 +14,7 @@ ${bold}USAGE${reset}
 
 ${bold}COMMANDS${reset}
   ${cyan}setup${reset} <flags...>             Create and provision a new VM instance
+  ${cyan}provision${reset} <id>                Re-run guest provisioning for an existing instance
   ${cyan}list${reset}                         List all instances
   ${cyan}status${reset} [id]                  Show instance status (all or one)
   ${cyan}start${reset} <id>                   Start an instance
@@ -26,6 +27,7 @@ ${bold}COMMANDS${reset}
 
 ${bold}EXAMPLES${reset}
   ${dim}\$${reset} sudo fireclaw setup --instance my-bot --telegram-token <tok> --telegram-users <uid>
+  ${dim}\$${reset} sudo fireclaw provision my-bot
   ${dim}\$${reset} sudo fireclaw list
   ${dim}\$${reset} sudo fireclaw status my-bot
   ${dim}\$${reset} sudo fireclaw shell my-bot
@@ -43,6 +45,9 @@ shift || true
 
 case "$cmd" in
   setup|create|provision)
+    if [[ "$cmd" == "provision" ]]; then
+      VM_PROVISION_CMD_NAME="fireclaw provision" exec "$SCRIPT_DIR/vm-provision" "$@"
+    fi
     VM_SETUP_CMD_NAME="fireclaw setup" exec "$SCRIPT_DIR/vm-setup" "$@"
     ;;
   list|status|start|stop|restart|logs|shell|token|destroy)
