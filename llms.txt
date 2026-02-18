@@ -1,93 +1,102 @@
 # fireclaw
 
-> Firecracker microVM control plane for running isolated OpenClaw instances
+> Firecracker microVM control plane for isolated OpenClaw instances
 
-fireclaw is a bash + systemd CLI that provisions and manages OpenClaw AI agent instances, each running inside its own Firecracker microVM. Install with `npm install -g fireclaw`, then use `sudo fireclaw <command>`. It provides per-instance isolation at the VM level (separate kernel, filesystem, network, process tree) without requiring Kubernetes or any orchestrator.
+`fireclaw` is a Bash + systemd CLI for provisioning and managing OpenClaw agents in Firecracker VMs. Install with `npm install -g fireclaw`, then run with `sudo fireclaw <command>`.
 
-## Architecture
+## Core architecture
 
-The system has three layers:
+Host:
 
-1. Host layer: systemd services manage Firecracker VM processes and socat localhost proxies.
-2. Network layer: A Linux bridge (fc-br0, 172.16.0.0/24) connects all VMs. Host NATs outbound traffic. Each VM gets a static IP. A socat proxy on the host forwards localhost:<port> to VM:18789, keeping the OpenClaw API localhost-only.
-3. Guest layer: Each VM runs cloud-init on boot, waits for apt locks, expands ext4 rootfs, configures Docker for Firecracker networking, pulls the OpenClaw container image, configures it via CLI, installs Playwright Chromium, and starts the OpenClaw gateway as a systemd service.
+- CLI entrypoint: `bin/fireclaw`
+- VM lifecycle units: `firecracker-vmdemo-<id>.service`
+- Localhost proxy units: `vmdemo-proxy-<id>.service`
+- Network plumbing: bridge + NAT
 
-State is split between /var/lib/fireclaw/.vm-<id>/ (env, tokens, provision vars) and /srv/firecracker/vm-demo/<id>/ (VM images, Firecracker config, logs).
+Guest:
 
-## Files
+- cloud-init for bootstrapping user and base packages
+- Docker configured for Firecracker constraints (`iptables=false`, `ip6tables=false`, `bridge=none`)
+- `openclaw-<id>.service` systemd unit running containerized gateway
 
-### Internal: bin/vm-common.sh
-Shared library sourced by all scripts. Provides:
-- Constants: paths, ports, bridge config, default image
-- Helpers: log/warn/die, require_cmd, require_root, validate_instance_id
-- Instance path resolvers: instance_dir, instance_env, instance_token, fc_instance_dir
-- Systemd unit name generators: vm_service, proxy_service
-- State management: load_instance_env (sources .env into shell)
-- IP/port allocation: next_port and next_ip scan existing .env files to find the next available
-- Network setup: ensure_bridge_and_nat creates the bridge, enables IP forwarding, adds NAT rule
-- SSH: wait_for_ssh polls with retries until the VM accepts connections
+State split:
 
-### fireclaw setup (bin/vm-setup)
-One-shot instance creator. Run once per instance with --instance and --telegram-token (required). Flow:
-1. Validates inputs and checks prerequisites (firecracker, cloud-localds, socat, jq, etc.)
-2. Generates SSH keypair if needed
-3. Allocates next available host port and VM IP
-4. Creates instance state directory and FC runtime directory
-5. Writes .env and .token files
-6. Copies base rootfs (with reflink if supported) and kernel
-7. Generates cloud-init user-data, meta-data, network-config
-8. Creates seed.img via cloud-localds
-9. Resizes copied rootfs with qemu-img (default 40G, configurable)
-10. Generates Firecracker vm-config.json via jq
-11. Writes start-vm.sh (bridge/tap setup + exec firecracker with unique --api-sock) and stop-vm.sh (tap teardown)
-12. Creates systemd units for VM and socat proxy
-13. Boots VM, waits for SSH
-14. SCPs provision-guest.sh + vars into VM, runs it via SSH
-15. Enables proxy service
-16. Polls both VM-side and proxied health checks, prints summary
+- Instance metadata/secrets: `/var/lib/fireclaw/.vm-<id>/`
+- Firecracker runtime artifacts: `/srv/firecracker/vm-demo/<id>/`
 
-Options: --model, --skills, --openclaw-image, --vm-vcpu, --vm-mem-mib, --disk-size, --api-sock, --base-kernel, --base-rootfs, --base-initrd, --anthropic-api-key, --openai-api-key, --minimax-api-key, --skip-browser-install, --telegram-users
+## Commands
 
-### scripts/provision-guest.sh
-Runs inside the VM as root. Receives a vars file with all config. Flow:
-1. Waits for cloud-init and apt/dpkg locks, then installs Docker/jq/curl as needed
-2. Expands guest ext4 filesystem with resize2fs
-3. Writes idempotent Docker daemon config (`iptables=false`, `ip6tables=false`, `bridge=none`) and restarts Docker if needed
-4. Creates config, workspace, and tools directories
-5. Writes env file for the container (API keys, gateway token, env vars)
-6. Pulls the OpenClaw Docker image
-7. Runs OpenClaw CLI inside a temporary container (`--network host`) to configure gateway, Telegram, model, skills, MiniMax provider (if model is minimax/*), then runs `doctor --fix`
-8. Installs browser binaries with `npx --yes playwright@latest install chromium` into a shared tools volume, then writes the executable path into OpenClaw config
-9. Creates a VM-side health check script (`/usr/local/bin/openclaw-health-<id>.sh`)
-10. Creates and enables a systemd service that runs the OpenClaw gateway container with `--network host`
+Top-level commands in `bin/fireclaw`:
 
-### fireclaw <command> (bin/vm-ctl)
-Lifecycle management. Commands:
-- list: shows all instances with IP, port, VM state, proxy state, and both host/guest health signals
-- status [id]: detailed status including guest service state (via SSH) and host/guest health
-- start <id>: enables VM service, waits for SSH, starts guest service, enables proxy
-- stop <id>: stops proxy, stops guest service via SSH, stops VM
-- restart <id>: stop then start
-- logs <id> [guest|host]: tails journalctl (guest service via SSH, or host VM+proxy services)
-- shell <id> [command...]: SSH into VM, optionally run a command
-- token <id>: prints gateway token
-- destroy <id> [--force]: stops services, removes systemd units, deletes all state and VM assets
+- `setup`: create + provision new VM
+- `provision`: re-run guest provisioning for existing VM
+- `list`, `status`, `start`, `stop`, `restart`, `logs`, `shell`, `token`, `destroy`
 
-## Key Design Decisions
+Implementation files:
 
-- Plain bash + systemd, no external dependencies beyond standard Linux tools and Firecracker
-- Each VM is fully isolated: own kernel, own Docker daemon, own filesystem, own network namespace
-- No Docker socket mount from host into guest (security boundary)
-- Localhost-only proxy via socat means the OpenClaw API is never exposed on a public interface
-- IP and port allocation is file-based (scan .env files), not database-backed
-- cloud-init handles first-boot config (user, SSH keys, Docker install)
-- All secrets are passed via vars file at provision time, never hardcoded in scripts
-- Instance IDs are validated to [a-z0-9_-]+ for safe use in paths and systemd unit names
+- `bin/vm-setup`: one-shot create/provision path
+- `bin/vm-provision`: reprovision-only flow
+- `bin/vm-ctl`: lifecycle and inspection commands
+- `scripts/provision-guest.sh`: guest-side provisioning
 
-## Environment Variable Overrides
+## Shared shell library (`bin/vm-common.sh`)
 
-All commands respect env overrides: STATE_ROOT (/var/lib/fireclaw), FC_ROOT, BASE_PORT, BRIDGE_NAME, BRIDGE_ADDR, SUBNET_CIDR, SSH_KEY_PATH, BASE_IMAGES_DIR, OPENCLAW_IMAGE_DEFAULT, DISK_SIZE, API_SOCK
+Important helpers:
 
-## Prerequisites
+- Validation: `validate_instance_id`, `validate_host_port`
+- Path/unit naming: `instance_dir`, `instance_env`, `instance_token`, `fc_instance_dir`, `vm_service`, `proxy_service`
+- Allocation:
+  - `next_port`: first free host port above `BASE_PORT` (skips assigned + in-use ports)
+  - `ensure_host_port_available`: validates explicit user-chosen host port
+  - `next_ip`: first free VM IP in configured `/24` subnet, reserving bridge gateway
+- Network parsing: `subnet_mask_bits`, `subnet_prefix`, `bridge_gateway_ip`
+- Connectivity/health: `wait_for_ssh`, `check_guest_health`
 
-Linux host with KVM (/dev/kvm), firecracker at /usr/local/bin/firecracker, cloud-localds (cloud-image-utils), qemu-img (qemu-utils), socat, jq, iptables, iproute2, ssh/scp, curl, openssl. Base VM images: Linux kernel (vmlinux) and ext4 rootfs with cloud-init support.
+## `setup` flow highlights (`bin/vm-setup`)
+
+1. Parse flags and validate required values.
+2. Validate host dependencies.
+3. Resolve host port (`--host-port` or automatic).
+4. Resolve VM IP from `SUBNET_CIDR` + `BRIDGE_ADDR`.
+5. Generate cloud-init and Firecracker config.
+6. Create host systemd units for VM and proxy.
+7. Boot VM, wait for SSH, run guest provision script.
+8. Enable proxy and verify host/guest health.
+
+Notable flags:
+
+- `--host-port`
+- `--disk-size`
+- `--api-sock`
+- `--base-kernel`, `--base-rootfs`, `--base-initrd`
+- `--anthropic-api-key`, `--openai-api-key`, `--minimax-api-key`
+- `--skip-browser-install`
+
+## Networking model
+
+Defaults:
+
+- `BRIDGE_NAME=fc-br0`
+- `BRIDGE_ADDR=172.16.0.1/24`
+- `SUBNET_CIDR=172.16.0.0/24`
+- `BASE_PORT=18890` (first auto proxy port is 18891)
+
+OpenClaw gateway stays inside guest on `:18789`. Host proxy binds `127.0.0.1:<HOST_PORT>` and forwards to `<VM_IP>:18789`.
+
+Automatic VM IP allocation currently supports `/24` subnets.
+
+## Testing
+
+`npm test` now runs both:
+
+- Shell syntax checks (`npm run lint:shell`)
+- Unit tests (`npm run test:unit`)
+
+Unit tests live in `tests/unit/vm-common.test.sh` and validate allocation/network helper behavior plus core validators.
+
+## Design decisions
+
+- Keep control plane simple (Bash + systemd).
+- Favor explicit, inspectable artifacts over hidden state stores.
+- Keep API surface localhost-only by default.
+- Support reprovisioning existing guests without recreating VMs.
