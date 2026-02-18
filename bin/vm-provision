@@ -4,11 +4,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 source "$SCRIPT_DIR/vm-common.sh"
 
+CMD_NAME="${VM_PROVISION_CMD_NAME:-fireclaw provision}"
+
 usage() {
   cat <<EOF
-Usage: fireclaw provision <instance>
+Usage: $CMD_NAME <instance>
 EOF
 }
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
+  usage
+  exit 0
+fi
 
 [[ $# -eq 1 ]] || { usage; exit 1; }
 

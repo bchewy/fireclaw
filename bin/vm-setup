@@ -15,6 +15,7 @@ Options:
   --model <id>                         (default: anthropic/claude-opus-4-6)
   --skills <csv>                       (default: github,tmux,coding-agent,session-logs,skill-creator)
   --openclaw-image <image>
+  --host-port <n>                      (default: first free port above BASE_PORT)
   --vm-vcpu <n>                        (default: 4)
   --vm-mem-mib <n>                     (default: 8192)
   --disk-size <size>                   (default: 40G)
@@ -40,6 +41,7 @@ VM_VCPU="${VM_VCPU:-4}"
 VM_MEM_MIB="${VM_MEM_MIB:-8192}"
 DISK_SIZE="${DISK_SIZE:-40G}"
 API_SOCK="${API_SOCK:-}"
+HOST_PORT_OVERRIDE=""
 BASE_IMAGES_DIR="${BASE_IMAGES_DIR:-/srv/firecracker/base/images}"
 BASE_KERNEL="${BASE_KERNEL:-$BASE_IMAGES_DIR/vmlinux}"
 BASE_ROOTFS="${BASE_ROOTFS:-$BASE_IMAGES_DIR/rootfs.ext4}"
@@ -58,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --model) MODEL="$2"; shift 2 ;;
     --skills) SKILLS="$2"; shift 2 ;;
     --openclaw-image) OPENCLAW_IMAGE="$2"; shift 2 ;;
+    --host-port) HOST_PORT_OVERRIDE="$2"; shift 2 ;;
     --vm-vcpu) VM_VCPU="$2"; shift 2 ;;
     --vm-mem-mib) VM_MEM_MIB="$2"; shift 2 ;;
     --disk-size) DISK_SIZE="$2"; shift 2 ;;
@@ -102,8 +105,15 @@ fi
 [[ "$API_SOCK" = /* ]] || die "--api-sock must be an absolute path"
 [[ ! -e "$inst_dir" ]] || die "Instance already exists: $inst_dir"
 
-HOST_PORT="$(next_port)"
+if [[ -n "$HOST_PORT_OVERRIDE" ]]; then
+  ensure_host_port_available "$HOST_PORT_OVERRIDE"
+  HOST_PORT="$HOST_PORT_OVERRIDE"
+else
+  HOST_PORT="$(next_port)"
+fi
 VM_IP="$(next_ip)"
+SUBNET_MASK_BITS="$(subnet_mask_bits)"
+BRIDGE_GATEWAY_IP="$(bridge_gateway_ip)"
 VM_OCTET="${VM_IP##*.}"
 SHORT_ID="$(echo "$INSTANCE" | tr -cd 'a-z0-9' | cut -c1-6)"
 [[ -n "$SHORT_ID" ]] || SHORT_ID="vm"
@@ -190,10 +200,10 @@ ethernets:
     set-name: eth0
     dhcp4: false
     addresses:
-      - $VM_IP/24
+      - $VM_IP/$SUBNET_MASK_BITS
     routes:
       - to: 0.0.0.0/0
-        via: 172.16.0.1
+        via: $BRIDGE_GATEWAY_IP
     nameservers:
       addresses: [1.1.1.1,8.8.8.8]
 EOF
