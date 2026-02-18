@@ -11,8 +11,9 @@
     "README.md"
   ],
   "scripts": {
-    "lint:shell": "bash -n bin/fireclaw && bash -n bin/vm-common.sh && bash -n bin/vm-setup && bash -n bin/vm-ctl && bash -n scripts/provision-guest.sh",
-    "test": "npm run lint:shell",
+    "lint:shell": "bash -n bin/fireclaw && bash -n bin/vm-common.sh && bash -n bin/vm-setup && bash -n bin/vm-ctl && bash -n bin/vm-provision && bash -n scripts/provision-guest.sh && bash -n tests/unit/vm-common.test.sh",
+    "test:unit": "bash tests/unit/vm-common.test.sh",
+    "test": "npm run lint:shell && npm run test:unit",
     "pack:check": "npm pack --dry-run",
     "prepublishOnly": "npm test && npm run pack:check"
   },
