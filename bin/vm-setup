@@ -8,7 +8,7 @@ CMD_NAME="${VM_SETUP_CMD_NAME:-fireclaw setup}"
 
 usage() {
   cat <<EOF
-Usage: $CMD_NAME --instance <id> --telegram-token <token> [options]
+Usage: $CMD_NAME --instance <id> --telegram-token <token> --telegram-users <csv> [options]
 
 Options:
   --telegram-users <csv>
@@ -29,6 +29,37 @@ Options:
   --skip-browser-install
   -h|--help
 EOF
+}
+
+require_option_value() {
+  local opt="$1"
+  local value="${2-}"
+  [[ -n "$value" && "$value" != --* ]] || die "Missing value for $opt"
+}
+
+validate_no_newline() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "$name must not contain newlines"
+}
+
+validate_positive_int() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" =~ ^[0-9]+$ ]] || die "$name must be numeric"
+  (( 10#$value > 0 )) || die "$name must be greater than zero"
+}
+
+csv_values() {
+  printf '%s' "$1" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d'
+}
+
+write_kv() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  validate_no_newline "$key" "$value"
+  printf "%s=%s\n" "$key" "$value" >> "$file"
 }
 
 INSTANCE=""
@@ -54,23 +85,23 @@ MINIMAX_API_KEY="${MINIMAX_API_KEY:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --instance) INSTANCE="$2"; shift 2 ;;
-    --telegram-token) TELEGRAM_TOKEN="$2"; shift 2 ;;
-    --telegram-users) TELEGRAM_USERS="$2"; shift 2 ;;
-    --model) MODEL="$2"; shift 2 ;;
-    --skills) SKILLS="$2"; shift 2 ;;
-    --openclaw-image) OPENCLAW_IMAGE="$2"; shift 2 ;;
-    --host-port) HOST_PORT_OVERRIDE="$2"; shift 2 ;;
-    --vm-vcpu) VM_VCPU="$2"; shift 2 ;;
-    --vm-mem-mib) VM_MEM_MIB="$2"; shift 2 ;;
-    --disk-size) DISK_SIZE="$2"; shift 2 ;;
-    --api-sock) API_SOCK="$2"; shift 2 ;;
-    --base-kernel) BASE_KERNEL="$2"; shift 2 ;;
-    --base-rootfs) BASE_ROOTFS="$2"; shift 2 ;;
-    --base-initrd) BASE_INITRD="$2"; shift 2 ;;
-    --anthropic-api-key) ANTHROPIC_API_KEY="$2"; shift 2 ;;
-    --openai-api-key) OPENAI_API_KEY="$2"; shift 2 ;;
-    --minimax-api-key) MINIMAX_API_KEY="$2"; shift 2 ;;
+    --instance) require_option_value "$1" "${2-}"; INSTANCE="$2"; shift 2 ;;
+    --telegram-token) require_option_value "$1" "${2-}"; TELEGRAM_TOKEN="$2"; shift 2 ;;
+    --telegram-users) require_option_value "$1" "${2-}"; TELEGRAM_USERS="$2"; shift 2 ;;
+    --model) require_option_value "$1" "${2-}"; MODEL="$2"; shift 2 ;;
+    --skills) require_option_value "$1" "${2-}"; SKILLS="$2"; shift 2 ;;
+    --openclaw-image) require_option_value "$1" "${2-}"; OPENCLAW_IMAGE="$2"; shift 2 ;;
+    --host-port) require_option_value "$1" "${2-}"; HOST_PORT_OVERRIDE="$2"; shift 2 ;;
+    --vm-vcpu) require_option_value "$1" "${2-}"; VM_VCPU="$2"; shift 2 ;;
+    --vm-mem-mib) require_option_value "$1" "${2-}"; VM_MEM_MIB="$2"; shift 2 ;;
+    --disk-size) require_option_value "$1" "${2-}"; DISK_SIZE="$2"; shift 2 ;;
+    --api-sock) require_option_value "$1" "${2-}"; API_SOCK="$2"; shift 2 ;;
+    --base-kernel) require_option_value "$1" "${2-}"; BASE_KERNEL="$2"; shift 2 ;;
+    --base-rootfs) require_option_value "$1" "${2-}"; BASE_ROOTFS="$2"; shift 2 ;;
+    --base-initrd) require_option_value "$1" "${2-}"; BASE_INITRD="$2"; shift 2 ;;
+    --anthropic-api-key) require_option_value "$1" "${2-}"; ANTHROPIC_API_KEY="$2"; shift 2 ;;
+    --openai-api-key) require_option_value "$1" "${2-}"; OPENAI_API_KEY="$2"; shift 2 ;;
+    --minimax-api-key) require_option_value "$1" "${2-}"; MINIMAX_API_KEY="$2"; shift 2 ;;
     --skip-browser-install) SKIP_BROWSER_INSTALL="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1" ;;
@@ -79,12 +110,20 @@ done
 
 [[ -n "$INSTANCE" ]] || die "Missing --instance"
 [[ -n "$TELEGRAM_TOKEN" ]] || die "Missing --telegram-token"
+[[ -n "$TELEGRAM_USERS" ]] || die "Missing --telegram-users"
+[[ -n "$(csv_values "$TELEGRAM_USERS")" ]] || die "--telegram-users must include at least one allowed Telegram user ID"
 validate_instance_id "$INSTANCE"
+validate_positive_int "VM_VCPU" "$VM_VCPU"
+validate_positive_int "VM_MEM_MIB" "$VM_MEM_MIB"
+VM_VCPU=$((10#$VM_VCPU))
+VM_MEM_MIB=$((10#$VM_MEM_MIB))
 
 require_root
-for c in firecracker systemctl ip iptables openssl jq cloud-localds ssh scp socat curl qemu-img; do
+for c in firecracker systemctl ip iptables openssl jq cloud-localds ssh scp socat curl qemu-img install; do
   require_cmd "$c"
 done
+FIRECRACKER_BIN="$(command -v firecracker)"
+[[ "$FIRECRACKER_BIN" = /* ]] || die "firecracker must resolve to an absolute executable path"
 
 [[ -f "$BASE_KERNEL" ]] || die "Kernel not found: $BASE_KERNEL"
 [[ -f "$BASE_ROOTFS" ]] || die "Rootfs not found: $BASE_ROOTFS"
@@ -107,7 +146,7 @@ fi
 
 if [[ -n "$HOST_PORT_OVERRIDE" ]]; then
   ensure_host_port_available "$HOST_PORT_OVERRIDE"
-  HOST_PORT="$HOST_PORT_OVERRIDE"
+  HOST_PORT="$((10#$HOST_PORT_OVERRIDE))"
 else
   HOST_PORT="$(next_port)"
 fi
@@ -122,33 +161,35 @@ VM_MAC="$(printf '06:fc:00:10:00:%02x' "$VM_OCTET")"
 GATEWAY_TOKEN="$(openssl rand -hex 32)"
 
 mkdir -p "$inst_dir/config" "$inst_dir/workspace"
+chmod 700 "$inst_dir"
 mkdir -p "$fc_dir/images" "$fc_dir/config" "$fc_dir/logs"
 mkdir -p "$(dirname "$API_SOCK")"
 
-cat > "$inst_dir/.env" <<EOF
-INSTANCE_ID=$INSTANCE
-HOST_PORT=$HOST_PORT
-VM_IP=$VM_IP
-VM_TAP=$VM_TAP
-VM_MAC=$VM_MAC
-GATEWAY_TOKEN=$GATEWAY_TOKEN
-MODEL=$MODEL
-SKILLS=$SKILLS
-TELEGRAM_USERS=$TELEGRAM_USERS
-OPENCLAW_IMAGE=$OPENCLAW_IMAGE
-VM_VCPU=$VM_VCPU
-VM_MEM_MIB=$VM_MEM_MIB
-DISK_SIZE=$DISK_SIZE
-API_SOCK=$API_SOCK
-SSH_KEY_PATH=$SSH_KEY_PATH
-SKIP_BROWSER_INSTALL=$SKIP_BROWSER_INSTALL
-ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
-OPENAI_API_KEY=$OPENAI_API_KEY
-MINIMAX_API_KEY=$MINIMAX_API_KEY
-EOF
+ENV_FILE="$(instance_env "$INSTANCE")"
+install -m 600 /dev/null "$ENV_FILE"
+write_kv "$ENV_FILE" FIRECLAW_STATE_FORMAT "plain-v1"
+write_kv "$ENV_FILE" INSTANCE_ID "$INSTANCE"
+write_kv "$ENV_FILE" HOST_PORT "$HOST_PORT"
+write_kv "$ENV_FILE" VM_IP "$VM_IP"
+write_kv "$ENV_FILE" VM_TAP "$VM_TAP"
+write_kv "$ENV_FILE" VM_MAC "$VM_MAC"
+write_kv "$ENV_FILE" GATEWAY_TOKEN "$GATEWAY_TOKEN"
+write_kv "$ENV_FILE" MODEL "$MODEL"
+write_kv "$ENV_FILE" SKILLS "$SKILLS"
+write_kv "$ENV_FILE" TELEGRAM_USERS "$TELEGRAM_USERS"
+write_kv "$ENV_FILE" OPENCLAW_IMAGE "$OPENCLAW_IMAGE"
+write_kv "$ENV_FILE" VM_VCPU "$VM_VCPU"
+write_kv "$ENV_FILE" VM_MEM_MIB "$VM_MEM_MIB"
+write_kv "$ENV_FILE" DISK_SIZE "$DISK_SIZE"
+write_kv "$ENV_FILE" API_SOCK "$API_SOCK"
+write_kv "$ENV_FILE" SSH_KEY_PATH "$SSH_KEY_PATH"
+write_kv "$ENV_FILE" SKIP_BROWSER_INSTALL "$SKIP_BROWSER_INSTALL"
+write_kv "$ENV_FILE" ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
+write_kv "$ENV_FILE" OPENAI_API_KEY "$OPENAI_API_KEY"
+write_kv "$ENV_FILE" MINIMAX_API_KEY "$MINIMAX_API_KEY"
 
-echo "$GATEWAY_TOKEN" > "$inst_dir/.token"
-chmod 600 "$inst_dir/.token"
+install -m 600 /dev/null "$inst_dir/.token"
+printf '%s\n' "$GATEWAY_TOKEN" > "$inst_dir/.token"
 
 log "Preparing VM disk and assets"
 cp --reflink=auto "$BASE_ROOTFS" "$fc_dir/images/rootfs.ext4" 2>/dev/null || cp "$BASE_ROOTFS" "$fc_dir/images/rootfs.ext4"
@@ -247,11 +288,12 @@ SUBNET_CIDR="$SUBNET_CIDR"
 VM_TAP="$VM_TAP"
 API_SOCK="$API_SOCK"
 CONFIG_JSON="$fc_dir/config/vm-config.json"
+FIRECRACKER_BIN="$FIRECRACKER_BIN"
 
 if ! ip link show "\$BRIDGE_NAME" >/dev/null 2>&1; then
   ip link add "\$BRIDGE_NAME" type bridge
 fi
-ip addr add "\$BRIDGE_ADDR" dev "\$BRIDGE_NAME" 2>/dev/null || true
+ip -4 addr show dev "\$BRIDGE_NAME" | grep -Fq " \$BRIDGE_ADDR " || ip addr add "\$BRIDGE_ADDR" dev "\$BRIDGE_NAME"
 ip link set "\$BRIDGE_NAME" up
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 iptables -t nat -C POSTROUTING -s "\$SUBNET_CIDR" ! -o "\$BRIDGE_NAME" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "\$SUBNET_CIDR" ! -o "\$BRIDGE_NAME" -j MASQUERADE
@@ -261,7 +303,7 @@ ip link set "\$VM_TAP" master "\$BRIDGE_NAME"
 ip link set "\$VM_TAP" up
 
 rm -f "\$API_SOCK"
-exec /usr/local/bin/firecracker --api-sock "\$API_SOCK" --config-file "\$CONFIG_JSON"
+exec "\$FIRECRACKER_BIN" --api-sock "\$API_SOCK" --config-file "\$CONFIG_JSON"
 EOF
 chmod +x "$fc_dir/start-vm.sh"
 
@@ -319,9 +361,10 @@ if ! wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180 "$INSTANCE"; then
 fi
 
 PROVISION_VARS="$inst_dir/provision.vars"
-: > "$PROVISION_VARS"
-kv() { printf "%s=%q\n" "$1" "$2" >> "$PROVISION_VARS"; }
+install -m 600 /dev/null "$PROVISION_VARS"
+kv() { write_kv "$PROVISION_VARS" "$1" "$2"; }
 
+kv FIRECLAW_STATE_FORMAT "plain-v1"
 kv INSTANCE_ID "$INSTANCE"
 kv TELEGRAM_TOKEN "$TELEGRAM_TOKEN"
 kv TELEGRAM_USERS "$TELEGRAM_USERS"

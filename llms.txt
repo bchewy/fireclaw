@@ -29,7 +29,7 @@ State split:
 Top-level commands in `bin/fireclaw`:
 
 - `setup`: create + provision new VM
-- `provision`: re-run guest provisioning for existing VM
+- `provision`: re-run guest provisioning for existing VM; supports `--telegram-users <csv>` to update/migrate saved allowlists
 - `list`, `status`, `start`, `stop`, `restart`, `logs`, `shell`, `token`, `destroy`
 
 Implementation files:
@@ -81,7 +81,7 @@ Defaults:
 - `SUBNET_CIDR=172.16.0.0/24`
 - `BASE_PORT=18890` (first auto proxy port is 18891)
 
-OpenClaw gateway stays inside guest on `:18789`. Host proxy binds `127.0.0.1:<HOST_PORT>` and forwards to `<VM_IP>:18789`.
+OpenClaw gateway binds inside the guest on `0.0.0.0:18789`, so it is reachable at `<VM_IP>:18789` wherever the Firecracker bridge/subnet permits. Host proxy access binds `127.0.0.1:<HOST_PORT>` and forwards to `<VM_IP>:18789`.
 
 Automatic VM IP allocation currently supports `/24` subnets.
 
@@ -98,5 +98,6 @@ Unit tests live in `tests/unit/vm-common.test.sh` and validate allocation/networ
 
 - Keep control plane simple (Bash + systemd).
 - Favor explicit, inspectable artifacts over hidden state stores.
-- Keep API surface localhost-only by default.
+- Keep host-facing proxy access localhost-only by default; bridge/subnet reachability is part of the VM network security boundary.
 - Support reprovisioning existing guests without recreating VMs.
+- Reprovisioning rewrites guest config/unit state and restarts `openclaw-<id>.service` so changed env/image/unit settings take effect.

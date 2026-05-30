@@ -65,6 +65,9 @@ _print_status_table() {
 }
 
 cmd_list() {
+  require_root
+  local nullglob_was_set=0
+  shopt -q nullglob && nullglob_was_set=1
   shopt -s nullglob
   local rows=()
   for d in "$STATE_ROOT"/.vm-*/; do
@@ -91,13 +94,18 @@ cmd_list() {
     proxy_state="$(systemctl is-active "$(proxy_service "$id")" 2>/dev/null)" || proxy_state="inactive"
     rows+=("${id}|${VM_IP}|${HOST_PORT}|${vm_state}|${proxy_state}|${health}")
   done
-  shopt -u nullglob
-  printf '%s\n' "${rows[@]}" | _print_status_table
+  (( nullglob_was_set )) || shopt -u nullglob
+  if (( ${#rows[@]} == 0 )); then
+    _print_status_table < /dev/null
+  else
+    printf '%s\n' "${rows[@]}" | _print_status_table
+  fi
 }
 
 cmd_status_one() {
   local id="$1"
   validate_instance_id "$id"
+  require_root
   load_instance_env "$id"
   local ssh_key="${SSH_KEY_PATH:-$HOME/.ssh/vmdemo_vm}"
   local vm_state proxy_state health host_health guest_health guest
@@ -108,7 +116,7 @@ cmd_status_one() {
   guest_health="down"
   curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && host_health="up"
   guest="unknown"
-  if wait_for_ssh "$VM_IP" "$ssh_key" 1 "$id"; then
+  if ssh_reachable "$VM_IP" "$ssh_key"; then
     guest="$(ssh_run "$VM_IP" "systemctl is-active openclaw-$id.service" 2>/dev/null)" || guest="unknown"
     if check_guest_health "$id" "$VM_IP" "$ssh_key"; then
       guest_health="up"
@@ -160,8 +168,10 @@ cmd_stop() {
   load_instance_env "$id"
 
   systemctl stop "$(proxy_service "$id")" 2>/dev/null || true
-  if wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 1 "$id"; then
+  if ssh_reachable "$VM_IP" "$SSH_KEY_PATH"; then
     ssh_run "$VM_IP" "sudo systemctl stop openclaw-$id.service" || true
+  else
+    warn "VM SSH unavailable; skipping guest service stop"
   fi
   systemctl stop "$(vm_service "$id")"
   cmd_status_one "$id"
@@ -176,7 +186,9 @@ cmd_logs() {
   local id="$1"
   local mode="${2:-guest}"
   validate_instance_id "$id"
+  require_root
   load_instance_env "$id"
+  [[ "$mode" == "guest" || "$mode" == "host" ]] || die "Usage: $CMD_NAME logs <id> [guest|host]"
 
   if [[ "$mode" == "host" ]]; then
     journalctl -u "$(vm_service "$id")" -u "$(proxy_service "$id")" -f
@@ -191,6 +203,7 @@ cmd_shell() {
   local id="$1"
   shift || true
   validate_instance_id "$id"
+  require_root
   load_instance_env "$id"
   wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 30 "$id" || die "VM SSH unavailable"
 
@@ -204,10 +217,12 @@ cmd_shell() {
 cmd_token() {
   local id="$1"
   validate_instance_id "$id"
+  require_root
   cat "$(instance_token "$id")"
 }
 
 cmd_destroy() {
+  [[ $# -eq 1 || ( $# -eq 2 && "$2" == "--force" ) ]] || die "Usage: $CMD_NAME destroy <id> [--force]"
   local id="$1"
   local force="${2:-}"
   validate_instance_id "$id"
@@ -240,14 +255,14 @@ shift || true
 
 case "$cmd" in
   list) cmd_list ;;
-  status) cmd_status "$@" ;;
+  status) [[ $# -le 1 ]] || die "Usage: $CMD_NAME status [id]"; cmd_status "$@" ;;
   start) [[ $# -eq 1 ]] || die "Usage: $CMD_NAME start <id>"; cmd_start "$1" ;;
   stop) [[ $# -eq 1 ]] || die "Usage: $CMD_NAME stop <id>"; cmd_stop "$1" ;;
   restart) [[ $# -eq 1 ]] || die "Usage: $CMD_NAME restart <id>"; cmd_restart "$1" ;;
-  logs) [[ $# -ge 1 ]] || die "Usage: $CMD_NAME logs <id> [guest|host]"; cmd_logs "$@" ;;
+  logs) [[ $# -ge 1 && $# -le 2 ]] || die "Usage: $CMD_NAME logs <id> [guest|host]"; cmd_logs "$@" ;;
   shell) [[ $# -ge 1 ]] || die "Usage: $CMD_NAME shell <id> [command...]"; id="$1"; shift; cmd_shell "$id" "$@" ;;
   token) [[ $# -eq 1 ]] || die "Usage: $CMD_NAME token <id>"; cmd_token "$1" ;;
-  destroy) [[ $# -ge 1 ]] || die "Usage: $CMD_NAME destroy <id> [--force]"; cmd_destroy "$@" ;;
+  destroy) cmd_destroy "$@" ;;
   -h|--help|help) usage ;;
   *) die "Unknown command: $cmd" ;;
 esac

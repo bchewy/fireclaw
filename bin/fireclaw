@@ -14,7 +14,7 @@ ${bold}USAGE${reset}
 
 ${bold}COMMANDS${reset}
   ${cyan}setup${reset} <flags...>             Create and provision a new VM instance
-  ${cyan}provision${reset} <id>                Re-run guest provisioning for an existing instance
+  ${cyan}provision${reset} <id> [flags...]     Re-run guest provisioning for an existing instance
   ${cyan}list${reset}                         List all instances
   ${cyan}status${reset} [id]                  Show instance status (all or one)
   ${cyan}start${reset} <id>                   Start an instance

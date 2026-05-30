@@ -36,7 +36,7 @@ Date: 2026-02-07
 
 5. **Browser install nuances**
    - `npx playwright install` fails if Playwright isn’t already a dependency.
-   - Use `npx --yes playwright@latest install chromium` and **mount** the tools dir so assets land in:
+   - Use the image's Playwright package when present, with a pinned fallback, and **mount** the tools dir so assets land in:
      ```
      /home/ubuntu/openclaw-<id>/tools/.playwright
      ```
@@ -56,13 +56,13 @@ Date: 2026-02-07
 
 1. ~~**Add `--api-sock` support**~~ Done — each VM gets a unique socket.
 2. ~~**Add `--disk-size` and auto‑resize logic**~~ Done — `fireclaw setup --disk-size`.
-3. **Add apt lock handling** (wait for cloud‑init to release `/var/lib/apt/lists/lock`).
-4. **Make Docker config idempotent** in provisioning (write daemon.json + restart docker).
-5. **Ensure browser install is reliable**:
-   - Use `playwright@latest install chromium`
-   - Ensure tools dir is mounted for installs
-6. **Verify Telegram enablement**:
-   - CLI prints “Telegram configured, not enabled yet.”
-   - Consider `openclaw doctor --fix` after config changes.
-7. **Better health check**:
-   - Add a VM‑side health check script and have the host query it.
+3. ~~**Add apt lock handling**~~ Done — provisioning waits for cloud-init and apt/dpkg locks.
+4. ~~**Make Docker config idempotent**~~ Done — provisioning writes daemon.json and restarts Docker only when needed.
+5. ~~**Ensure browser install is reliable**~~ Done — browser assets are installed into the mounted tools dir, using the image Playwright package when available.
+6. ~~**Verify Telegram enablement**~~ Done — provisioning configures Telegram, applies `doctor --fix`, and rejects empty allowlists.
+7. ~~**Better health check**~~ Done — host checks can call the VM-side health script as well as the proxy.
+
+Remaining improvements to consider:
+
+1. Add integration coverage for setup/provision/restart behavior using a disposable VM image.
+2. Add a release checklist for package versioning, smoke tests, and npm publish.

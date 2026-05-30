@@ -5,14 +5,66 @@ set -euo pipefail
 VARS_FILE="$1"
 [[ -f "$VARS_FILE" ]] || { echo "Vars file missing: $VARS_FILE" >&2; exit 1; }
 
-set -a
-source "$VARS_FILE"
-set +a
+legacy_unquote_value() {
+  local value="$1"
+  local out="" ch inner
+  if [[ "$value" == "''" ]]; then
+    printf ''
+    return
+  fi
+  if [[ "$value" == \$\'*\' && ${#value} -ge 3 ]]; then
+    inner="${value:2:${#value}-3}"
+    printf '%b' "$inner"
+    return
+  fi
+  while [[ -n "$value" ]]; do
+    ch="${value:0:1}"
+    if [[ "$ch" == "\\" && ${#value} -gt 1 ]]; then
+      value="${value:1}"
+      out="${out}${value:0:1}"
+    else
+      out="${out}${ch}"
+    fi
+    value="${value:1}"
+  done
+  printf '%s' "$out"
+}
+
+load_vars_file() {
+  local format line key value
+  format="$(grep '^FIRECLAW_STATE_FORMAT=' "$VARS_FILE" | tail -n 1 | cut -d= -f2- || true)"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" && "$line" != \#* ]] || continue
+    [[ "$line" == *=* ]] || { echo "Invalid vars entry in $VARS_FILE: $line" >&2; exit 1; }
+    key="${line%%=*}"
+    value="${line#*=}"
+    if [[ "$key" == "FIRECLAW_STATE_FORMAT" ]]; then
+      continue
+    fi
+    if [[ "$format" != "plain-v1" ]]; then
+      value="$(legacy_unquote_value "$value")"
+    fi
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || { echo "Invalid newline in vars value: $key" >&2; exit 1; }
+    case "$key" in
+      INSTANCE_ID|TELEGRAM_TOKEN|TELEGRAM_USERS|MODEL|SKILLS|GATEWAY_TOKEN|OPENCLAW_IMAGE|SKIP_BROWSER_INSTALL|DISK_SIZE|ANTHROPIC_API_KEY|OPENAI_API_KEY|MINIMAX_API_KEY)
+        printf -v "$key" '%s' "$value"
+        export "$key"
+        ;;
+      *)
+        echo "Unknown vars key in $VARS_FILE: $key" >&2
+        exit 1
+        ;;
+    esac
+  done < "$VARS_FILE"
+}
+
+load_vars_file
 
 require() { [[ -n "${!1:-}" ]] || { echo "Missing required var: $1" >&2; exit 1; }; }
 
 require INSTANCE_ID
 require TELEGRAM_TOKEN
+require TELEGRAM_USERS
 require MODEL
 require SKILLS
 require GATEWAY_TOKEN
@@ -30,9 +82,24 @@ TOOLS_DIR="/home/ubuntu/openclaw-${INSTANCE_ID}/tools"
 ENV_FILE="$CONFIG_ROOT/openclaw.env"
 GUEST_SERVICE="openclaw-${INSTANCE_ID}.service"
 HEALTH_SCRIPT="/usr/local/bin/openclaw-health-${INSTANCE_ID}.sh"
+PLAYWRIGHT_FALLBACK_PACKAGE="${PLAYWRIGHT_FALLBACK_PACKAGE:-playwright@1.44.1}"
 
 log()  { printf '==> %s\n' "$*"; }
 warn() { printf 'Warning: %s\n' "$*" >&2; }
+
+csv_values() {
+  printf '%s' "$1" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d'
+}
+
+csv_json_array() {
+  local values
+  values="$(csv_values "$1")"
+  if [[ -z "$values" ]]; then
+    printf '[]\n'
+  else
+    printf '%s\n' "$values" | jq -R . | jq -s .
+  fi
+}
 
 wait_for_cloud_init() {
   if command -v cloud-init >/dev/null 2>&1; then
@@ -167,6 +234,15 @@ if ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
 fi
 ensure_docker_daemon_config
 
+skills_json="$(csv_json_array "${SKILLS:-}")"
+
+telegram_users_values="$(csv_values "${TELEGRAM_USERS:-}")"
+if [[ -z "$telegram_users_values" ]]; then
+  echo "TELEGRAM_USERS must include at least one allowed Telegram user ID; refusing to create an unreachable allowlist bot" >&2
+  exit 1
+fi
+telegram_allow_from_json="$(printf '%s\n' "$telegram_users_values" | jq -R . | jq -s .)"
+
 mkdir -p "$CONFIG_DIR" "$WORKSPACE_DIR" "$TOOLS_DIR"
 chown -R ubuntu:ubuntu "$CONFIG_ROOT" "/home/ubuntu/openclaw-${INSTANCE_ID}"
 
@@ -205,18 +281,6 @@ run_openclaw_cli() {
     --entrypoint /bin/bash \
     "$OPENCLAW_IMAGE" -se
 }
-
-skills_json="[]"
-IFS=',' read -r -a skills_arr <<< "${SKILLS:-}"
-if (( ${#skills_arr[@]} > 0 )); then
-  skills_json="$(printf '%s\n' "${skills_arr[@]}" | sed '/^$/d' | jq -R . | jq -s .)"
-fi
-
-telegram_allow_from_json="[]"
-IFS=',' read -r -a users_arr <<< "${TELEGRAM_USERS:-}"
-if (( ${#users_arr[@]} > 0 )); then
-  telegram_allow_from_json="$(printf '%s\n' "${users_arr[@]}" | sed '/^$/d' | jq -R . | jq -s .)"
-fi
 
 run_openclaw_cli <<'EOF'
 set -euo pipefail
@@ -263,15 +327,33 @@ EOF
 fi
 
 if [[ "${SKIP_BROWSER_INSTALL:-false}" != "true" ]]; then
-  docker run --rm \
+  docker run --rm -i \
     --network host \
+    -e HOME=/home/node \
     -e PLAYWRIGHT_BROWSERS_PATH=/home/node/clawd/tools/.playwright \
+    -e PLAYWRIGHT_FALLBACK_PACKAGE="$PLAYWRIGHT_FALLBACK_PACKAGE" \
     -v "$TOOLS_DIR:/home/node/clawd/tools" \
     --entrypoint /bin/bash \
-    "$OPENCLAW_IMAGE" -lc "
-      set -euo pipefail
-      npx --yes playwright@latest install chromium
-    "
+    "$OPENCLAW_IMAGE" -se <<'EOF'
+set -euo pipefail
+
+if playwright_cli="$(node <<'NODE'
+const path = require("path");
+try {
+  const pkg = require.resolve("playwright/package.json");
+  process.stdout.write(path.join(path.dirname(pkg), "cli.js"));
+} catch {
+  process.exit(1);
+}
+NODE
+)"; then
+  echo "Using Playwright from image: $playwright_cli"
+  node "$playwright_cli" install chromium
+else
+  echo "Using fallback Playwright package: $PLAYWRIGHT_FALLBACK_PACKAGE"
+  npx --yes "$PLAYWRIGHT_FALLBACK_PACKAGE" install chromium
+fi
+EOF
 
   chrome_host_path="$(
     find "$TOOLS_DIR/.playwright" -type f \
@@ -319,7 +401,7 @@ Requires=docker.service
 [Service]
 Type=simple
 ExecStartPre=-/usr/bin/docker rm -f openclaw-$INSTANCE_ID
-ExecStart=/usr/bin/docker run --rm --name openclaw-$INSTANCE_ID --init --network host --env-file $ENV_FILE -v $CONFIG_DIR:/home/node/.openclaw -v $WORKSPACE_DIR:/home/node/.openclaw/workspace -v $TOOLS_DIR:/home/node/clawd/tools $OPENCLAW_IMAGE node dist/index.js gateway --bind lan --port 18789
+ExecStart=/usr/bin/docker run --rm --name openclaw-$INSTANCE_ID --init --network host --env-file $ENV_FILE -e HOME=/home/node -v $CONFIG_DIR:/home/node/.openclaw -v $WORKSPACE_DIR:/home/node/.openclaw/workspace -v $TOOLS_DIR:/home/node/clawd/tools $OPENCLAW_IMAGE node dist/index.js gateway --bind lan --port 18789
 ExecStop=/usr/bin/docker stop openclaw-$INSTANCE_ID
 Restart=always
 RestartSec=5
@@ -329,6 +411,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now "$GUEST_SERVICE"
+systemctl enable "$GUEST_SERVICE"
+systemctl restart "$GUEST_SERVICE"
 
 echo "Guest provisioning complete for $INSTANCE_ID"
