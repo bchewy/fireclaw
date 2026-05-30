@@ -31,38 +31,65 @@ Run [OpenClaw](https://github.com/openclaw/openclaw) instances inside Firecracke
 
 ## How it works
 
-```text
-Host
-├── fireclaw CLI (bash)
-├── systemd: firecracker-vmdemo-<id>.service
-├── systemd: vmdemo-proxy-<id>.service
-├── bridge + NAT: fc-br0 + iptables
-└── Firecracker VM (<vm-ip>)
-    ├── cloud-init (user + ssh + base packages)
-    ├── docker daemon (firecracker-safe network settings)
-    └── systemd: openclaw-<id>.service
+```mermaid
+flowchart LR
+  operator["Operator<br/>sudo fireclaw ..."]
+
+  subgraph host["Host"]
+    cli["fireclaw CLI<br/>Bash entrypoint"]
+    state["Instance state<br/>/var/lib/fireclaw/.vm-id<br/>.env, .token, provision.vars"]
+    assets["Firecracker assets<br/>/srv/firecracker/vm-demo/id<br/>rootfs, seed, config, logs, start/stop scripts"]
+    vmUnit["systemd VM unit<br/>firecracker-vmdemo-id.service"]
+    proxyUnit["systemd proxy unit<br/>vmdemo-proxy-id.service"]
+    net["Bridge + NAT<br/>fc-br0, tap, iptables"]
+    proxy["Localhost proxy<br/>127.0.0.1:HOST_PORT"]
+  end
+
+  subgraph guest["Firecracker VM"]
+    cloudInit["cloud-init<br/>ubuntu user, SSH, base packages"]
+    docker["Docker daemon<br/>iptables=false, bridge=none"]
+    guestProvision["guest provision script<br/>/tmp/provision-guest.sh"]
+    guestUnit["guest systemd unit<br/>openclaw-id.service"]
+    container["OpenClaw container<br/>gateway :18789"]
+    health["guest health script<br/>docker running + /health"]
+  end
+
+  operator --> cli
+  cli --> state
+  cli --> assets
+  cli --> vmUnit
+  cli --> proxyUnit
+  vmUnit --> assets
+  vmUnit --> net
+  net --> guest
+  cli -->|"SCP script + vars, SSH invoke"| guestProvision
+  guestProvision --> docker
+  guestProvision --> guestUnit
+  guestUnit --> container
+  health -.->|"checks container + /health"| container
+  proxyUnit --> proxy
+  proxy -->|"forwards to VM_IP:18789"| container
+  container -.->|"VM subnet :18789"| net
+  cli -->|"health gate"| proxy
+  cli -->|"health gate over SSH"| health
 ```
 
-`fireclaw setup` flow:
+The stable runtime names still include `vmdemo` (`/srv/firecracker/vm-demo`, `firecracker-vmdemo-*`, and `vmdemo-proxy-*`) so existing instances keep working. The package, CLI, and agent skill are named `fireclaw`.
 
-1. Validate inputs and host dependencies.
-2. Allocate a host port and guest IP (or use explicit `--host-port`).
-3. Copy and optionally resize rootfs.
-4. Generate cloud-init seed + Firecracker config.
-5. Create host systemd units (VM + localhost proxy).
-6. Boot VM and wait for SSH.
-7. Copy and run guest provisioning script.
-8. Enable proxy and run host/guest health checks.
+Lifecycle behavior:
 
-If setup fails after creating instance state, Fireclaw stops/disables the temporary units, removes the tap if it was created, deletes the partial state/assets for that instance, reloads systemd, and exits non-zero.
+- `setup` validates inputs, allocates a host port and VM IP, writes root-only instance state, builds Firecracker assets, creates host systemd units, boots the VM, waits for SSH, then SCPs `provision-guest.sh` and `provision.vars` into `/tmp` for guest setup. It returns success only after both the localhost proxy and guest health checks pass.
+- Failed `setup` rolls back only the instance being created: temporary units are stopped/removed, the tap is deleted when present, systemd is reloaded, and partial state/assets are removed.
+- `provision <id>` reuses an existing VM and saved `provision.vars`. It can update `TELEGRAM_USERS`, reruns guest provisioning, rewrites OpenClaw config, restarts `openclaw-<id>.service`, re-enables the proxy, and requires the same guest + proxy health gate. It does not allocate a new IP, port, or disk.
+- `start <id>` starts the existing VM unit, waits for SSH, starts the existing guest service and proxy, then health-gates. It does not reprovision.
+- `stop <id>` stops proxy first, then guest service when SSH is reachable, then the VM. `destroy <id>` removes host units plus state/assets.
 
-`fireclaw provision <id>` flow:
+Builder caveats:
 
-1. Reuse saved instance config (`provision.vars`).
-2. Wait for VM SSH reachability.
-3. Re-run guest provisioning script to rewrite OpenClaw config, env, browser assets, and guest unit.
-4. Reload systemd and restart the guest `openclaw-<id>.service` so changed config/image/unit state is applied.
-5. Re-enable proxy and require both guest and proxy health checks to pass.
+- The host proxy is localhost-only (`127.0.0.1:<HOST_PORT>`), but the guest gateway binds inside the VM on `0.0.0.0:18789`; keep bridge/subnet reachability private.
+- Docker is installed/configured by guest provisioning, not cloud-init. The container runs with `--network host`, and Docker bridge/iptables are disabled for Firecracker.
+- `setup`, `provision`, and `start` are strict health-gated commands. `list` and `status` are looser inspection commands and may show health as up when either host or guest health responds.
+- Automatic VM IP allocation currently assumes a `/24` subnet, and automatic host ports start above `BASE_PORT` (default first port: `18891`).
 
 ## Prerequisites
 
