@@ -1,5 +1,5 @@
 ---
-name: fireclaw-vm-demo
+name: fireclaw
 description: Provision, configure, and manage OpenClaw AI agent instances running inside Firecracker microVMs. Use when creating new VM instances, controlling VM lifecycle (start/stop/restart/destroy), debugging guest services, checking instance health, or modifying VM provisioning scripts.
 compatibility: Requires Linux host with KVM, firecracker, cloud-localds, socat, jq, iptables, iproute2, ssh, scp, curl, openssl. All commands require root.
 metadata:
@@ -7,7 +7,7 @@ metadata:
   version: "1.0"
 ---
 
-# Fireclaw VM Demo
+# Fireclaw
 
 Firecracker microVM control plane for isolated OpenClaw instances. Each instance gets its own VM with separate kernel, filesystem, network, and Docker daemon.
 
