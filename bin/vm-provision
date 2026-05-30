@@ -22,14 +22,18 @@ validate_no_newline() {
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "$name must not contain newlines"
 }
 
-append_kv() {
+set_kv() {
   local file="$1"
   local key="$2"
   local value="$3"
+  local tmp
   validate_no_newline "key" "$key"
   validate_no_newline "$key" "$value"
-  printf "%s=%s\n" "$key" "$value" >> "$file"
-  chmod 600 "$file"
+  tmp="$(mktemp)"
+  awk -F= -v key="$key" '$1 != key { print }' "$file" > "$tmp"
+  printf "%s=%s\n" "$key" "$value" >> "$tmp"
+  install -m 600 "$tmp" "$file"
+  rm -f "$tmp"
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
@@ -67,8 +71,8 @@ PROVISION_VARS="$(instance_dir "$INSTANCE")/provision.vars"
 
 if [[ -n "$TELEGRAM_USERS_OVERRIDE" ]]; then
   [[ -n "$(csv_values "$TELEGRAM_USERS_OVERRIDE")" ]] || die "--telegram-users must include at least one allowed Telegram user ID"
-  append_kv "$(instance_env "$INSTANCE")" TELEGRAM_USERS "$TELEGRAM_USERS_OVERRIDE"
-  append_kv "$PROVISION_VARS" TELEGRAM_USERS "$TELEGRAM_USERS_OVERRIDE"
+  set_kv "$(instance_env "$INSTANCE")" TELEGRAM_USERS "$TELEGRAM_USERS_OVERRIDE"
+  set_kv "$PROVISION_VARS" TELEGRAM_USERS "$TELEGRAM_USERS_OVERRIDE"
   TELEGRAM_USERS="$TELEGRAM_USERS_OVERRIDE"
 fi
 
@@ -90,19 +94,12 @@ ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile
 
 systemctl enable --now "$(proxy_service "$INSTANCE")"
 
-health_ok="false"
-for _ in {1..30}; do
-  if curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1; then
-    health_ok="true"
-    break
-  fi
-  sleep 2
-done
+if ! wait_for_instance_health "$INSTANCE" "$VM_IP" "$HOST_PORT" "$SSH_KEY_PATH" 30; then
+  die "Health checks did not pass for $INSTANCE after provisioning"
+fi
 
 echo "✓ VM provisioning complete"
 echo "  Instance: $INSTANCE"
 echo "  VM IP:    $VM_IP"
 echo "  Port:     $HOST_PORT"
-if [[ "$health_ok" != "true" ]]; then
-  echo "  Health:   pending (service may still be warming up)"
-fi
+echo "  Health:   up (guest + proxy)"

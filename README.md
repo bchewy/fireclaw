@@ -54,13 +54,15 @@ Host
 7. Copy and run guest provisioning script.
 8. Enable proxy and run host/guest health checks.
 
+If setup fails after creating instance state, Fireclaw stops/disables the temporary units, removes the tap if it was created, deletes the partial state/assets for that instance, reloads systemd, and exits non-zero.
+
 `fireclaw provision <id>` flow:
 
 1. Reuse saved instance config (`provision.vars`).
 2. Wait for VM SSH reachability.
 3. Re-run guest provisioning script to rewrite OpenClaw config, env, browser assets, and guest unit.
 4. Reload systemd and restart the guest `openclaw-<id>.service` so changed config/image/unit state is applied.
-5. Re-enable proxy and verify health.
+5. Re-enable proxy and require both guest and proxy health checks to pass.
 
 ## Prerequisites
 
@@ -265,6 +267,12 @@ sudo fireclaw provision my-bot
 
 Provisioning rewrites guest config and restarts `openclaw-my-bot.service`; use it after changing saved env/config/image values.
 
+Health gating:
+
+- `setup`, `provision`, and `start` require both the guest health script and the localhost proxy `/health` endpoint to pass before returning success.
+- A failed `setup` rolls back only the instance it was creating. It does not touch existing instances.
+- Guest-side `/tmp/provision.vars` and `/tmp/provision-guest.sh` are removed after provisioning exits.
+
 ## Troubleshooting
 
 VM does not start:
@@ -272,6 +280,7 @@ VM does not start:
 - Check host unit logs: `sudo journalctl -u firecracker-vmdemo-<id>.service -xe`
 - Validate KVM and Firecracker binary path.
 - Ensure API socket path is unique and writable.
+- If setup exits non-zero, verify rollback with `sudo fireclaw list` and `sudo systemctl list-units --all 'firecracker-vmdemo-<id>*' 'vmdemo-proxy-<id>*'`.
 
 SSH never becomes reachable:
 
@@ -318,4 +327,5 @@ Contribution expectations:
 - Strong isolation boundary is the VM, not a container namespace.
 - No host Docker socket mount into guest containers.
 - The host proxy is localhost-only by default, reducing remote host attack surface. The guest gateway also listens on the VM network, so bridge/subnet reachability is part of the security boundary.
-- Secrets are stored per instance under `STATE_ROOT`; secure host filesystem and limit access.
+- Secrets are stored per instance under `STATE_ROOT`; instance state and VM asset directories are created root-only.
+- Provisioning copies secrets into the guest only long enough to run the guest script, then removes the temporary files from `/tmp`.

@@ -158,6 +158,11 @@ cmd_start() {
   ssh_run "$VM_IP" "sudo systemctl enable --now openclaw-$id.service" || warn "Guest service start failed"
   systemctl enable --now "$(proxy_service "$id")"
 
+  if ! wait_for_instance_health "$id" "$VM_IP" "$HOST_PORT" "$SSH_KEY_PATH" 30; then
+    cmd_status_one "$id"
+    die "Health checks did not pass for $id after start"
+  fi
+
   cmd_status_one "$id"
 }
 
@@ -242,6 +247,7 @@ cmd_destroy() {
   rm -f "/etc/systemd/system/$(proxy_service "$id")"
   rm -f "/etc/systemd/system/$(vm_service "$id")"
   systemctl daemon-reload
+  systemctl reset-failed "$(proxy_service "$id")" "$(vm_service "$id")" 2>/dev/null || true
 
   rm -rf "$(instance_dir "$id")" "$(fc_instance_dir "$id")"
 

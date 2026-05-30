@@ -91,6 +91,23 @@ EOF
   fi
 }
 
+test_ensure_host_port_available_accepts_free_port() {
+  local state="$TMP_ROOT/state-port-free"
+  mkdir -p "$state"
+
+  STATE_ROOT="$state" bash -c 'source "$1"; _host_port_in_use() { return 1; }; ensure_host_port_available 18910' _ "$VM_COMMON"
+}
+
+test_ensure_host_port_available_rejects_listening_port() {
+  local state="$TMP_ROOT/state-port-listening"
+  mkdir -p "$state"
+
+  if STATE_ROOT="$state" bash -c 'source "$1"; _host_port_in_use() { return 0; }; ensure_host_port_available 18910' _ "$VM_COMMON" >/dev/null 2>&1; then
+    echo "Expected listening host port to be rejected" >&2
+    return 1
+  fi
+}
+
 test_next_port_rejects_invalid_base_port() {
   local state="$TMP_ROOT/state-port-invalid-base"
   mkdir -p "$state"
@@ -177,6 +194,8 @@ run_test "validate_instance_id rejects invalid IDs" test_validate_instance_id_re
 run_test "validate_host_port rejects out-of-range values" test_validate_host_port_rejects_out_of_range
 run_test "next_port fills first unallocated port" test_next_port_finds_first_unallocated_port
 run_test "ensure_host_port_available rejects allocated port" test_ensure_host_port_available_rejects_allocated_port
+run_test "ensure_host_port_available accepts free port" test_ensure_host_port_available_accepts_free_port
+run_test "ensure_host_port_available rejects listening port" test_ensure_host_port_available_rejects_listening_port
 run_test "next_port rejects invalid BASE_PORT" test_next_port_rejects_invalid_base_port
 run_test "next_ip uses configured subnet and fills gaps" test_next_ip_uses_configured_subnet_and_fills_gap
 run_test "next_ip restores nullglob" test_next_ip_restores_nullglob

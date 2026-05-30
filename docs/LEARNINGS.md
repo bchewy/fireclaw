@@ -66,3 +66,14 @@ Remaining improvements to consider:
 
 1. Add integration coverage for setup/provision/restart behavior using a disposable VM image.
 2. Add a release checklist for package versioning, smoke tests, and npm publish.
+3. Consider adding a global setup lock; allocation scans file state and is safe for sequential setup, but concurrent setup can still race before each process writes its chosen `.env`.
+
+## Production hardening validated later
+
+- Explicit `--host-port` now succeeds for free ports and still rejects assigned/listening ports.
+- Setup validates persisted values before creating state/assets, so malformed values such as newlines do not leave partial instance directories.
+- Setup failure after VM/state creation rolls back the new instance state/assets/units/tap instead of stranding a running VM.
+- `setup`, `provision`, and `start` require guest + proxy health before returning success.
+- `provision --telegram-users` replaces the saved allowlist value instead of appending duplicate keys.
+- Guest `/tmp/provision.vars` and `/tmp/provision-guest.sh` are removed after guest provisioning exits.
+- New instance state directories, VM asset directories, saved env files, and provisioned guest rootfs images are root-only on the host.

@@ -51,6 +51,7 @@ Important helpers:
   - `next_ip`: first free VM IP in configured `/24` subnet, reserving bridge gateway
 - Network parsing: `subnet_mask_bits`, `subnet_prefix`, `bridge_gateway_ip`
 - Connectivity/health: `wait_for_ssh`, `check_guest_health`
+- Readiness gate: `wait_for_instance_health` requires both guest health and localhost proxy health before setup/provision/start report success.
 
 ## `setup` flow highlights (`bin/vm-setup`)
 
@@ -62,6 +63,7 @@ Important helpers:
 6. Create host systemd units for VM and proxy.
 7. Boot VM, wait for SSH, run guest provision script.
 8. Enable proxy and verify host/guest health.
+9. On setup failure after state creation, rollback stops/disables temporary units, removes the tap, reloads systemd, and deletes only that instance's partial state/assets.
 
 Notable flags:
 
@@ -101,3 +103,6 @@ Unit tests live in `tests/unit/vm-common.test.sh` and validate allocation/networ
 - Keep host-facing proxy access localhost-only by default; bridge/subnet reachability is part of the VM network security boundary.
 - Support reprovisioning existing guests without recreating VMs.
 - Reprovisioning rewrites guest config/unit state and restarts `openclaw-<id>.service` so changed env/image/unit settings take effect.
+- Guest provisioning removes `/tmp/provision.vars` and `/tmp/provision-guest.sh` on exit so copied secrets do not remain in guest `/tmp`.
+- Setup, provision, and start are health-gated; a command that cannot prove guest + proxy health exits non-zero instead of returning a pending success.
+- New instance state and Firecracker asset directories are created root-only; rootfs images are written `0600` because provisioned guests contain secrets.

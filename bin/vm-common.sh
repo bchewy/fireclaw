@@ -151,6 +151,7 @@ ensure_host_port_available() {
   validate_host_port "$candidate"
   _host_port_allocated "$candidate" && die "Host port is already assigned to an existing instance: $candidate"
   _host_port_in_use "$candidate" && die "Host port is already in use on this host: $candidate"
+  return 0
 }
 
 next_port() {
@@ -277,4 +278,33 @@ check_guest_health() {
   local script
   script="$(guest_health_script "$id")"
   ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 "ubuntu@$ip" "if [[ -x '$script' ]]; then sudo '$script'; else curl -fsS http://127.0.0.1:18789/health >/dev/null; fi" >/dev/null 2>&1
+}
+
+wait_for_instance_health() {
+  local id="$1"
+  local ip="$2"
+  local port="$3"
+  local key="${4:-$SSH_KEY_PATH}"
+  local retries="${5:-30}"
+  local host_ok="false"
+  local guest_ok="false"
+
+  validate_instance_id "$id"
+  validate_host_port "$port"
+
+  local i
+  for ((i=1; i<=retries; i++)); do
+    host_ok="false"
+    guest_ok="false"
+    curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1 && host_ok="true"
+    if check_guest_health "$id" "$ip" "$key"; then
+      guest_ok="true"
+    fi
+    if [[ "$host_ok" == "true" && "$guest_ok" == "true" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+
+  return 1
 }

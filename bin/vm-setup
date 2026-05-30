@@ -82,6 +82,40 @@ SKIP_BROWSER_INSTALL="false"
 ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
 OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 MINIMAX_API_KEY="${MINIMAX_API_KEY:-}"
+SETUP_COMPLETE="false"
+CLEANUP_ARMED="false"
+
+cleanup_failed_setup() {
+  local rc="$1"
+  [[ "$rc" -eq 0 || "$SETUP_COMPLETE" == "true" ]] && return 0
+  [[ "$CLEANUP_ARMED" == "true" ]] || return 0
+  set +e
+  if [[ -n "${INSTANCE:-}" && "$INSTANCE" =~ ^[a-z0-9_-]+$ ]]; then
+    warn "Setup failed; cleaning up partial instance: $INSTANCE"
+    local vm_svc proxy_svc
+    vm_svc="$(vm_service "$INSTANCE")"
+    proxy_svc="$(proxy_service "$INSTANCE")"
+    systemctl stop "$proxy_svc" 2>/dev/null || true
+    systemctl stop "$vm_svc" 2>/dev/null || true
+    systemctl disable "$proxy_svc" 2>/dev/null || true
+    systemctl disable "$vm_svc" 2>/dev/null || true
+    rm -f "/etc/systemd/system/$proxy_svc" "/etc/systemd/system/$vm_svc"
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed "$proxy_svc" "$vm_svc" 2>/dev/null || true
+    if [[ -n "${VM_TAP:-}" ]]; then
+      ip link set "$VM_TAP" down 2>/dev/null || true
+      ip link del "$VM_TAP" 2>/dev/null || true
+    fi
+    if [[ -n "${inst_dir:-}" ]]; then
+      rm -rf "$inst_dir"
+    fi
+    if [[ -n "${fc_dir:-}" ]]; then
+      rm -rf "$fc_dir"
+    fi
+  fi
+}
+
+trap 'rc=$?; cleanup_failed_setup "$rc"; exit "$rc"' EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -115,6 +149,22 @@ done
 validate_instance_id "$INSTANCE"
 validate_positive_int "VM_VCPU" "$VM_VCPU"
 validate_positive_int "VM_MEM_MIB" "$VM_MEM_MIB"
+validate_no_newline "TELEGRAM_TOKEN" "$TELEGRAM_TOKEN"
+validate_no_newline "TELEGRAM_USERS" "$TELEGRAM_USERS"
+validate_no_newline "MODEL" "$MODEL"
+validate_no_newline "SKILLS" "$SKILLS"
+validate_no_newline "OPENCLAW_IMAGE" "$OPENCLAW_IMAGE"
+validate_no_newline "DISK_SIZE" "$DISK_SIZE"
+validate_no_newline "API_SOCK" "$API_SOCK"
+validate_no_newline "BASE_KERNEL" "$BASE_KERNEL"
+validate_no_newline "BASE_ROOTFS" "$BASE_ROOTFS"
+validate_no_newline "BASE_INITRD" "$BASE_INITRD"
+validate_no_newline "ANTHROPIC_API_KEY" "$ANTHROPIC_API_KEY"
+validate_no_newline "OPENAI_API_KEY" "$OPENAI_API_KEY"
+validate_no_newline "MINIMAX_API_KEY" "$MINIMAX_API_KEY"
+if [[ -n "$HOST_PORT_OVERRIDE" ]]; then
+  validate_no_newline "HOST_PORT" "$HOST_PORT_OVERRIDE"
+fi
 VM_VCPU=$((10#$VM_VCPU))
 VM_MEM_MIB=$((10#$VM_MEM_MIB))
 
@@ -141,8 +191,15 @@ fc_dir="$(fc_instance_dir "$INSTANCE")"
 if [[ -z "$API_SOCK" ]]; then
   API_SOCK="$fc_dir/firecracker.socket"
 fi
+VM_SVC="$(vm_service "$INSTANCE")"
+PROXY_SVC="$(proxy_service "$INSTANCE")"
 [[ "$API_SOCK" = /* ]] || die "--api-sock must be an absolute path"
 [[ ! -e "$inst_dir" ]] || die "Instance already exists: $inst_dir"
+[[ ! -e "$fc_dir" ]] || die "Firecracker assets already exist: $fc_dir"
+[[ ! -e "$API_SOCK" ]] || die "Firecracker API socket already exists: $API_SOCK"
+[[ ! -e "/etc/systemd/system/$VM_SVC" ]] || die "VM unit already exists: /etc/systemd/system/$VM_SVC"
+[[ ! -e "/etc/systemd/system/$PROXY_SVC" ]] || die "Proxy unit already exists: /etc/systemd/system/$PROXY_SVC"
+CLEANUP_ARMED="true"
 
 if [[ -n "$HOST_PORT_OVERRIDE" ]]; then
   ensure_host_port_available "$HOST_PORT_OVERRIDE"
@@ -161,8 +218,9 @@ VM_MAC="$(printf '06:fc:00:10:00:%02x' "$VM_OCTET")"
 GATEWAY_TOKEN="$(openssl rand -hex 32)"
 
 mkdir -p "$inst_dir/config" "$inst_dir/workspace"
-chmod 700 "$inst_dir"
+chmod 700 "$inst_dir" "$inst_dir/config" "$inst_dir/workspace"
 mkdir -p "$fc_dir/images" "$fc_dir/config" "$fc_dir/logs"
+chmod 700 "$fc_dir" "$fc_dir/images" "$fc_dir/config" "$fc_dir/logs"
 mkdir -p "$(dirname "$API_SOCK")"
 
 ENV_FILE="$(instance_env "$INSTANCE")"
@@ -193,9 +251,10 @@ printf '%s\n' "$GATEWAY_TOKEN" > "$inst_dir/.token"
 
 log "Preparing VM disk and assets"
 cp --reflink=auto "$BASE_ROOTFS" "$fc_dir/images/rootfs.ext4" 2>/dev/null || cp "$BASE_ROOTFS" "$fc_dir/images/rootfs.ext4"
+chmod 600 "$fc_dir/images/rootfs.ext4"
 if [[ -n "$DISK_SIZE" ]]; then
   log "Resizing rootfs to $DISK_SIZE"
-  qemu-img resize "$fc_dir/images/rootfs.ext4" "$DISK_SIZE" >/dev/null
+  qemu-img resize -f raw "$fc_dir/images/rootfs.ext4" "$DISK_SIZE" >/dev/null
 fi
 cp "$BASE_KERNEL" "$fc_dir/images/vmlinux"
 
@@ -219,12 +278,8 @@ users:
       - $SSH_PUB_KEY
 package_update: true
 packages:
-  - docker.io
   - jq
   - curl
-runcmd:
-  - [ systemctl, enable, docker ]
-  - [ systemctl, start, docker ]
 EOF
 
 cat > "$fc_dir/config/meta-data" <<EOF
@@ -316,9 +371,6 @@ ip link del "\$VM_TAP" 2>/dev/null || true
 EOF
 chmod +x "$fc_dir/stop-vm.sh"
 
-VM_SVC="$(vm_service "$INSTANCE")"
-PROXY_SVC="$(proxy_service "$INSTANCE")"
-
 cat > "/etc/systemd/system/$VM_SVC" <<EOF
 [Unit]
 Description=Firecracker VM ($INSTANCE)
@@ -390,21 +442,12 @@ ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile
 
 systemctl enable --now "$PROXY_SVC"
 
-host_health_ok="false"
-guest_health_ok="false"
-GUEST_HEALTH_SCRIPT="$(guest_health_script "$INSTANCE")"
-for _ in {1..30}; do
-  if [[ "$guest_health_ok" != "true" ]] && check_guest_health "$INSTANCE" "$VM_IP" "$SSH_KEY_PATH"; then
-    guest_health_ok="true"
-  fi
-  if [[ "$host_health_ok" != "true" ]] && curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1; then
-    host_health_ok="true"
-  fi
-  if [[ "$guest_health_ok" == "true" && "$host_health_ok" == "true" ]]; then
-    break
-  fi
-  sleep 2
-done
+if ! wait_for_instance_health "$INSTANCE" "$VM_IP" "$HOST_PORT" "$SSH_KEY_PATH" 30; then
+  die "Health checks did not pass for $INSTANCE after provisioning"
+fi
+host_health_ok="true"
+guest_health_ok="true"
+SETUP_COMPLETE="true"
 
 echo "✓ VM instance configured"
 echo "  Instance: $INSTANCE"

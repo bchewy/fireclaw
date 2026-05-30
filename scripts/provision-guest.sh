@@ -5,6 +5,14 @@ set -euo pipefail
 VARS_FILE="$1"
 [[ -f "$VARS_FILE" ]] || { echo "Vars file missing: $VARS_FILE" >&2; exit 1; }
 
+cleanup_guest_tmp() {
+  if [[ "$VARS_FILE" == /tmp/provision.vars ]]; then
+    rm -f "$VARS_FILE"
+  fi
+  rm -f /tmp/provision-guest.sh
+}
+trap cleanup_guest_tmp EXIT
+
 legacy_unquote_value() {
   local value="$1"
   local out="" ch inner
