@@ -32,7 +32,7 @@
   "bugs": {
     "url": "https://github.com/bchewy/fireclaw/issues"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "author": "bchewy",
   "engines": {
     "node": ">=18"
