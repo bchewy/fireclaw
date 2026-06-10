@@ -11,6 +11,7 @@ usage() {
 Usage: $CMD_NAME <command> [instance]
 
 Commands:
+  doctor
   list
   status [id]
   start <id>
@@ -24,9 +25,10 @@ EOF
 }
 
 ssh_run() {
+  local id="$1"; shift
   local ip="$1"; shift
   local key="${SSH_KEY_PATH:-$HOME/.ssh/vmdemo_vm}"
-  ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "ubuntu@$ip" "$@"
+  ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$(ssh_known_hosts_file "$id")" "ubuntu@$ip" "$@"
 }
 
 _color() {
@@ -38,6 +40,15 @@ _color() {
     failed)          printf '%s%s%s' "$red"    "$val" "$reset" ;;
     *)               printf '%s%s%s' "$yellow" "$val" "$reset" ;;
   esac
+}
+
+# printf pads by byte count, so colorize after padding to keep columns aligned.
+_color_cell() {
+  local width="$1"
+  local val="$2"
+  local pad=$(( width - ${#val} ))
+  (( pad > 0 )) || pad=0
+  printf '%b%*s' "$(_color "$val")" "$pad" ""
 }
 
 _print_status_table() {
@@ -58,9 +69,9 @@ _print_status_table() {
     "--------" "----------" "-----" "------" "-------" "------"
 
   for i in "${!ids[@]}"; do
-    printf "%-14s %-14s %-7s %-10b %-10b %-8b\n" \
+    printf "%-14s %-14s %-7s %s %s %s\n" \
       "${ids[$i]}" "${ips[$i]}" "${ports[$i]}" \
-      "$(_color "${vms[$i]}")" "$(_color "${proxies[$i]}")" "$(_color "${healths[$i]}")"
+      "$(_color_cell 10 "${vms[$i]}")" "$(_color_cell 10 "${proxies[$i]}")" "$(_color_cell 8 "${healths[$i]}")"
   done
 }
 
@@ -71,28 +82,37 @@ cmd_list() {
   shopt -s nullglob
   local rows=()
   for d in "$STATE_ROOT"/.vm-*/; do
-    local id
+    local id row
     id="$(basename "$d" | sed 's/^\.vm-//')"
     if [[ ! "$id" =~ ^[a-z0-9_-]+$ ]]; then
       warn "Skipping invalid instance state directory: $d"
       continue
     fi
-    load_instance_env "$id"
-    local ssh_key="${SSH_KEY_PATH:-$HOME/.ssh/vmdemo_vm}"
-    local health="down"
-    local host_health="down"
-    local guest_health="down"
-    curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && host_health="up"
-    if check_guest_health "$id" "$VM_IP" "$ssh_key"; then
-      guest_health="up"
+    # Subshell so one corrupt .env degrades to an error row instead of
+    # killing the whole fleet view, and loaded values cannot leak across
+    # instances.
+    if row="$(
+      load_instance_env "$id" >/dev/null 2>&1 || exit 1
+      ssh_key="${SSH_KEY_PATH:-$HOME/.ssh/vmdemo_vm}"
+      health="down"
+      host_health="down"
+      guest_health="down"
+      curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && host_health="up"
+      if check_guest_health "$id" "$VM_IP" "$ssh_key"; then
+        guest_health="up"
+      fi
+      if [[ "$host_health" == "up" || "$guest_health" == "up" ]]; then
+        health="up"
+      fi
+      vm_state="$(systemctl is-active "$(vm_service "$id")" 2>/dev/null || true)"
+      proxy_state="$(systemctl is-active "$(proxy_service "$id")" 2>/dev/null || true)"
+      printf '%s|%s|%s|%s|%s|%s' "$id" "$VM_IP" "$HOST_PORT" "${vm_state:-inactive}" "${proxy_state:-inactive}" "$health"
+    )"; then
+      rows+=("$row")
+    else
+      warn "Unreadable instance state for '$id' (inspect: $d.env)"
+      rows+=("${id}|?|?|error|error|down")
     fi
-    if [[ "$host_health" == "up" || "$guest_health" == "up" ]]; then
-      health="up"
-    fi
-    local vm_state proxy_state
-    vm_state="$(systemctl is-active "$(vm_service "$id")" 2>/dev/null)" || vm_state="inactive"
-    proxy_state="$(systemctl is-active "$(proxy_service "$id")" 2>/dev/null)" || proxy_state="inactive"
-    rows+=("${id}|${VM_IP}|${HOST_PORT}|${vm_state}|${proxy_state}|${health}")
   done
   (( nullglob_was_set )) || shopt -u nullglob
   if (( ${#rows[@]} == 0 )); then
@@ -116,8 +136,8 @@ cmd_status_one() {
   guest_health="down"
   curl -fsS "http://127.0.0.1:$HOST_PORT/health" >/dev/null 2>&1 && host_health="up"
   guest="unknown"
-  if ssh_reachable "$VM_IP" "$ssh_key"; then
-    guest="$(ssh_run "$VM_IP" "systemctl is-active openclaw-$id.service" 2>/dev/null)" || guest="unknown"
+  if ssh_reachable "$VM_IP" "$ssh_key" "$id"; then
+    guest="$(ssh_run "$id" "$VM_IP" "systemctl is-active openclaw-$id.service" 2>/dev/null)" || guest="unknown"
     if check_guest_health "$id" "$VM_IP" "$ssh_key"; then
       guest_health="up"
     fi
@@ -155,7 +175,7 @@ cmd_start() {
   systemctl enable --now "$(vm_service "$id")"
   wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180 "$id" || die "VM started but SSH unreachable"
 
-  ssh_run "$VM_IP" "sudo systemctl enable --now openclaw-$id.service" || warn "Guest service start failed"
+  ssh_run "$id" "$VM_IP" "sudo systemctl enable --now openclaw-$id.service" || warn "Guest service start failed"
   systemctl enable --now "$(proxy_service "$id")"
 
   if ! wait_for_instance_health "$id" "$VM_IP" "$HOST_PORT" "$SSH_KEY_PATH" 30; then
@@ -173,12 +193,15 @@ cmd_stop() {
   load_instance_env "$id"
 
   systemctl stop "$(proxy_service "$id")" 2>/dev/null || true
-  if ssh_reachable "$VM_IP" "$SSH_KEY_PATH"; then
-    ssh_run "$VM_IP" "sudo systemctl stop openclaw-$id.service" || true
+  if ssh_reachable "$VM_IP" "$SSH_KEY_PATH" "$id"; then
+    ssh_run "$id" "$VM_IP" "sudo systemctl stop openclaw-$id.service" || true
   else
     warn "VM SSH unavailable; skipping guest service stop"
   fi
-  systemctl stop "$(vm_service "$id")"
+  systemctl stop "$(vm_service "$id")" || warn "Failed to stop $(vm_service "$id")"
+  # Without disabling, a stopped instance silently resurrects on host reboot.
+  systemctl disable "$(proxy_service "$id")" 2>/dev/null || true
+  systemctl disable "$(vm_service "$id")" 2>/dev/null || true
   cmd_status_one "$id"
 }
 
@@ -201,7 +224,7 @@ cmd_logs() {
   fi
 
   wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 30 "$id" || die "VM SSH unavailable"
-  ssh_run "$VM_IP" "sudo journalctl -u openclaw-$id.service -f"
+  ssh_run "$id" "$VM_IP" "sudo journalctl -u openclaw-$id.service -f"
 }
 
 cmd_shell() {
@@ -213,9 +236,9 @@ cmd_shell() {
   wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 30 "$id" || die "VM SSH unavailable"
 
   if [[ $# -gt 0 ]]; then
-    ssh_run "$VM_IP" "$*"
+    ssh_run "$id" "$VM_IP" "$*"
   else
-    ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "ubuntu@$VM_IP"
+    ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$(ssh_known_hosts_file "$id")" "ubuntu@$VM_IP"
   fi
 }
 
@@ -232,7 +255,18 @@ cmd_destroy() {
   local force="${2:-}"
   validate_instance_id "$id"
   require_root
-  load_instance_env "$id"
+
+  local env_ok="true"
+  if ! (load_instance_env "$id") >/dev/null 2>&1; then
+    env_ok="false"
+    if [[ "$force" != "--force" ]]; then
+      die "Cannot read state for '$id'; use --force to remove its units and directories anyway"
+    fi
+    warn "State for '$id' is unreadable; best-effort cleanup of units and directories"
+  fi
+  if [[ "$env_ok" == "true" ]]; then
+    load_instance_env "$id"
+  fi
 
   if [[ "$force" != "--force" ]]; then
     read -r -p "Destroy '$id' and remove VM assets? [y/N] " confirm
@@ -249,9 +283,98 @@ cmd_destroy() {
   systemctl daemon-reload
   systemctl reset-failed "$(proxy_service "$id")" "$(vm_service "$id")" 2>/dev/null || true
 
+  if [[ "$env_ok" == "true" ]]; then
+    if [[ -n "${VM_TAP:-}" ]]; then
+      ip link set "$VM_TAP" down 2>/dev/null || true
+      ip link del "$VM_TAP" 2>/dev/null || true
+    fi
+    if [[ -n "${API_SOCK:-}" ]]; then
+      rm -f "$API_SOCK"
+    fi
+  fi
+
   rm -rf "$(instance_dir "$id")" "$(fc_instance_dir "$id")"
 
   echo "Destroyed: $id"
+}
+
+cmd_doctor() {
+  local failures=0
+
+  _check() {
+    local label="$1"
+    local ok="$2"
+    local detail="${3:-}"
+    local green=$'\033[32m' red=$'\033[31m' yellow=$'\033[33m' reset=$'\033[0m'
+    if [[ "$ok" == "pass" ]]; then
+      printf '%s✓%s %s%s\n' "$green" "$reset" "$label" "${detail:+ ($detail)}"
+    elif [[ "$ok" == "skip" ]]; then
+      printf '%s-%s %s%s\n' "$yellow" "$reset" "$label" "${detail:+ ($detail)}"
+    else
+      printf '%s✗%s %s%s\n' "$red" "$reset" "$label" "${detail:+ ($detail)}"
+      failures=$((failures + 1))
+    fi
+  }
+
+  local c
+  for c in firecracker systemctl ip iptables openssl jq cloud-localds ssh scp socat curl qemu-img install flock; do
+    if command -v "$c" >/dev/null 2>&1; then
+      _check "command: $c" pass
+    else
+      _check "command: $c" fail "not found on PATH"
+    fi
+  done
+
+  if [[ -e /dev/kvm ]]; then
+    if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+      _check "/dev/kvm" pass
+    else
+      _check "/dev/kvm" fail "exists but not accessible by $(id -un)"
+    fi
+  else
+    _check "/dev/kvm" fail "missing (KVM required)"
+  fi
+
+  local img
+  for img in "${BASE_KERNEL:-${BASE_IMAGES_DIR:-/srv/firecracker/base/images}/vmlinux}" "${BASE_ROOTFS:-${BASE_IMAGES_DIR:-/srv/firecracker/base/images}/rootfs.ext4}"; do
+    if [[ -f "$img" ]]; then
+      _check "base image: $img" pass
+    else
+      _check "base image: $img" fail "missing"
+    fi
+  done
+
+  if ip link show "$BRIDGE_NAME" >/dev/null 2>&1; then
+    _check "bridge: $BRIDGE_NAME" pass "$(ip -4 -o addr show dev "$BRIDGE_NAME" | awk '{print $4}' | head -1)"
+  else
+    _check "bridge: $BRIDGE_NAME" skip "absent (setup creates it)"
+  fi
+
+  if [[ $EUID -eq 0 ]]; then
+    if iptables -t nat -C POSTROUTING -s "$SUBNET_CIDR" ! -o "$BRIDGE_NAME" -j MASQUERADE 2>/dev/null; then
+      _check "NAT rule for $SUBNET_CIDR" pass
+    else
+      _check "NAT rule for $SUBNET_CIDR" skip "absent (setup adds it)"
+    fi
+    if [[ -d "$STATE_ROOT" && -w "$STATE_ROOT" ]]; then
+      _check "state root: $STATE_ROOT" pass
+    else
+      _check "state root: $STATE_ROOT" skip "absent (setup creates it)"
+    fi
+  else
+    _check "NAT rule / state root" skip "requires root"
+  fi
+
+  local mem_avail_mib disk_avail
+  mem_avail_mib="$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo "?")"
+  disk_avail="$(df -h --output=avail "$FC_ROOT" 2>/dev/null | tail -1 | tr -d ' ' || echo "?")"
+  _check "capacity" pass "MemAvailable: ${mem_avail_mib} MiB, free on $FC_ROOT: ${disk_avail:-?}"
+
+  echo
+  if (( failures > 0 )); then
+    die "$failures check(s) failed"
+  fi
+  echo "All checks passed"
 }
 
 [[ $# -ge 1 ]] || { usage; exit 1; }
@@ -260,6 +383,7 @@ cmd="$1"
 shift || true
 
 case "$cmd" in
+  doctor) [[ $# -eq 0 ]] || die "Usage: $CMD_NAME doctor"; cmd_doctor ;;
   list) cmd_list ;;
   status) [[ $# -le 1 ]] || die "Usage: $CMD_NAME status [id]"; cmd_status "$@" ;;
   start) [[ $# -eq 1 ]] || die "Usage: $CMD_NAME start <id>"; cmd_start "$1" ;;
