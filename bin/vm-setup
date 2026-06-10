@@ -448,6 +448,7 @@ PartOf=$VM_SVC
 Type=simple
 DynamicUser=yes
 ExecStart=/usr/bin/socat TCP-LISTEN:$HOST_PORT,bind=127.0.0.1,reuseaddr,fork TCP:$VM_IP:18789
+SuccessExitStatus=143
 Restart=always
 RestartSec=2
 

@@ -351,7 +351,7 @@ cmd_doctor() {
   fi
 
   if [[ $EUID -eq 0 ]]; then
-    if iptables -t nat -C POSTROUTING -s "$SUBNET_CIDR" ! -o "$BRIDGE_NAME" -j MASQUERADE 2>/dev/null; then
+    if iptables -t nat -C POSTROUTING -s "$SUBNET_CIDR" ! -o "$BRIDGE_NAME" -j MASQUERADE >/dev/null 2>&1; then
       _check "NAT rule for $SUBNET_CIDR" pass
     else
       _check "NAT rule for $SUBNET_CIDR" skip "absent (setup adds it)"
