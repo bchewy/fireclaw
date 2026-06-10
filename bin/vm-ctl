@@ -317,7 +317,7 @@ cmd_doctor() {
   }
 
   local c
-  for c in firecracker systemctl ip iptables openssl jq cloud-localds ssh scp socat curl qemu-img install flock; do
+  for c in firecracker systemctl ip bridge iptables openssl jq cloud-localds ssh scp socat curl qemu-img install flock; do
     if command -v "$c" >/dev/null 2>&1; then
       _check "command: $c" pass
     else

@@ -15,6 +15,7 @@ with the result. With no options, provisioning reruns with the saved config.
 
 Options:
   --telegram-token <token>
+  --no-telegram                        (clear the saved token; disables Telegram in the guest)
   --telegram-users <csv>
   --model <id>
   --skills <csv>
@@ -23,6 +24,7 @@ Options:
   --openai-api-key <key>
   --minimax-api-key <key>
   --skip-browser-install
+  --browser-install                    (re-enable browser install)
   -h|--help
 EOF
 }
@@ -78,6 +80,7 @@ declare -A OVERRIDES=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --telegram-token) require_option_value "$1" "${2-}"; OVERRIDES[TELEGRAM_TOKEN]="$2"; shift 2 ;;
+    --no-telegram) OVERRIDES[TELEGRAM_TOKEN]=""; shift ;;
     --telegram-users) require_option_value "$1" "${2-}"; OVERRIDES[TELEGRAM_USERS]="$2"; shift 2 ;;
     --model) require_option_value "$1" "${2-}"; OVERRIDES[MODEL]="$2"; shift 2 ;;
     --skills) require_option_value "$1" "${2-}"; OVERRIDES[SKILLS]="$2"; shift 2 ;;
@@ -86,6 +89,7 @@ while [[ $# -gt 0 ]]; do
     --openai-api-key) require_option_value "$1" "${2-}"; OVERRIDES[OPENAI_API_KEY]="$2"; shift 2 ;;
     --minimax-api-key) require_option_value "$1" "${2-}"; OVERRIDES[MINIMAX_API_KEY]="$2"; shift 2 ;;
     --skip-browser-install) OVERRIDES[SKIP_BROWSER_INSTALL]="true"; shift ;;
+    --browser-install) OVERRIDES[SKIP_BROWSER_INSTALL]="false"; shift ;;
     *)
       die "Unknown option: $1"
       ;;
@@ -94,6 +98,12 @@ done
 
 validate_instance_id "$INSTANCE"
 require_root
+
+# load_instance_env resets the key variables from saved state, so remember
+# what the caller passed in the environment before it runs.
+ENV_ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+ENV_OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+ENV_MINIMAX_API_KEY="${MINIMAX_API_KEY:-}"
 
 load_instance_env "$INSTANCE"
 
@@ -106,6 +116,44 @@ if [[ -n "${OVERRIDES[TELEGRAM_USERS]:-}" ]]; then
   [[ -n "$(csv_values "${OVERRIDES[TELEGRAM_USERS]}")" ]] || die "--telegram-users must include at least one allowed Telegram user ID"
 fi
 
+effective() {
+  local key="$1"
+  local fallback="$2"
+  if [[ -v "OVERRIDES[$key]" ]]; then
+    printf '%s' "${OVERRIDES[$key]}"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+# Keys passed via the environment fill in for empty saved values, matching
+# the behavior the provider-key error message advertises.
+if [[ -z "$(effective ANTHROPIC_API_KEY "${ANTHROPIC_API_KEY:-}")" && -n "$ENV_ANTHROPIC_API_KEY" ]]; then
+  OVERRIDES[ANTHROPIC_API_KEY]="$ENV_ANTHROPIC_API_KEY"
+fi
+if [[ -z "$(effective OPENAI_API_KEY "${OPENAI_API_KEY:-}")" && -n "$ENV_OPENAI_API_KEY" ]]; then
+  OVERRIDES[OPENAI_API_KEY]="$ENV_OPENAI_API_KEY"
+fi
+if [[ -z "$(effective MINIMAX_API_KEY "${MINIMAX_API_KEY:-}")" && -n "$ENV_MINIMAX_API_KEY" ]]; then
+  OVERRIDES[MINIMAX_API_KEY]="$ENV_MINIMAX_API_KEY"
+fi
+
+# Validate the post-override view BEFORE persisting anything, so a rejected
+# run leaves the saved config exactly as it was.
+EFFECTIVE_TELEGRAM_TOKEN="$(effective TELEGRAM_TOKEN "$(saved_value "$PROVISION_VARS" TELEGRAM_TOKEN)")"
+EFFECTIVE_TELEGRAM_USERS="$(effective TELEGRAM_USERS "${TELEGRAM_USERS:-}")"
+if [[ -n "$EFFECTIVE_TELEGRAM_TOKEN" ]]; then
+  if [[ -z "$(csv_values "$EFFECTIVE_TELEGRAM_USERS")" ]]; then
+    die "Telegram is enabled but TELEGRAM_USERS is empty; rerun with: sudo $CMD_NAME $INSTANCE --telegram-users <csv>"
+  fi
+fi
+
+EFFECTIVE_MODEL="$(effective MODEL "${MODEL:-}")"
+ANTHROPIC_API_KEY="$(effective ANTHROPIC_API_KEY "${ANTHROPIC_API_KEY:-}")"
+OPENAI_API_KEY="$(effective OPENAI_API_KEY "${OPENAI_API_KEY:-}")"
+MINIMAX_API_KEY="$(effective MINIMAX_API_KEY "${MINIMAX_API_KEY:-}")"
+require_model_provider_key "$EFFECTIVE_MODEL"
+
 # TELEGRAM_TOKEN lives only in provision.vars; every other key is mirrored
 # into the .env state file that load_instance_env reads.
 for key in "${!OVERRIDES[@]}"; do
@@ -114,19 +162,6 @@ for key in "${!OVERRIDES[@]}"; do
     set_kv "$ENV_FILE" "$key" "${OVERRIDES[$key]}"
   fi
 done
-
-if [[ ${#OVERRIDES[@]} -gt 0 ]]; then
-  load_instance_env "$INSTANCE"
-fi
-
-EFFECTIVE_TELEGRAM_TOKEN="$(saved_value "$PROVISION_VARS" TELEGRAM_TOKEN)"
-if [[ -n "$EFFECTIVE_TELEGRAM_TOKEN" ]]; then
-  if [[ -z "$(csv_values "${TELEGRAM_USERS:-}")" ]]; then
-    die "Telegram is enabled but saved TELEGRAM_USERS is empty; rerun with: sudo $CMD_NAME $INSTANCE --telegram-users <csv>"
-  fi
-fi
-
-require_model_provider_key "$MODEL"
 
 if ! wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180 "$INSTANCE"; then
   die "VM SSH unreachable. Start it first: fireclaw start $INSTANCE"

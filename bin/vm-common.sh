@@ -174,6 +174,7 @@ _host_port_in_use() {
 ensure_host_port_available() {
   local candidate="$1"
   validate_host_port "$candidate"
+  (( 10#$candidate >= 1024 )) || die "host port must be >= 1024 (the proxy runs unprivileged): $candidate"
   _host_port_allocated "$candidate" && die "Host port is already assigned to an existing instance: $candidate"
   _host_port_in_use "$candidate" && die "Host port is already in use on this host: $candidate"
   return 0
@@ -238,23 +239,6 @@ next_ip() {
   die "IP pool exhausted for subnet $prefix.0/$mask"
 }
 
-ensure_bridge_and_nat() {
-  if ! ip link show "$BRIDGE_NAME" >/dev/null 2>&1; then
-    ip link add "$BRIDGE_NAME" type bridge
-  fi
-  ip -4 addr show dev "$BRIDGE_NAME" | grep -Fq " $BRIDGE_ADDR " || ip addr add "$BRIDGE_ADDR" dev "$BRIDGE_NAME"
-  ip link set "$BRIDGE_NAME" up
-
-  sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
-  iptables -t nat -C POSTROUTING -s "$SUBNET_CIDR" ! -o "$BRIDGE_NAME" -j MASQUERADE 2>/dev/null \
-    || iptables -t nat -A POSTROUTING -s "$SUBNET_CIDR" ! -o "$BRIDGE_NAME" -j MASQUERADE
-
-  # Instances must not reach each other; only host<->VM and VM->internet.
-  iptables -C FORWARD -i "$BRIDGE_NAME" -o "$BRIDGE_NAME" -j DROP 2>/dev/null \
-    || iptables -I FORWARD 1 -i "$BRIDGE_NAME" -o "$BRIDGE_NAME" -j DROP
-}
-
 wait_for_ssh() {
   local ip="$1"
   local key="${2:-$SSH_KEY_PATH}"
@@ -278,9 +262,17 @@ wait_for_ssh() {
   local known_hosts vm_state
   known_hosts="$(ssh_known_hosts_file "$instance_id")"
 
+  # Probe with /dev/null so a guest that regenerates host keys mid-boot (or
+  # accepts connections before authorized_keys lands) cannot poison the pin;
+  # the pin is recorded/verified only after the first successful login.
   local i
   for ((i=1; i<=retries; i++)); do
-    if ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=3 "ubuntu@$ip" true >/dev/null 2>&1; then
+    if ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 "ubuntu@$ip" true >/dev/null 2>&1; then
+      if [[ "$known_hosts" != "/dev/null" ]] && \
+         ! ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=3 "ubuntu@$ip" true >/dev/null 2>&1; then
+        warn "Guest SSH host key does not match the pinned key in $known_hosts. If the change is expected (rebuilt VM), remove that file and retry."
+        return 1
+      fi
       return 0
     fi
     if [[ -n "$vm_svc" ]]; then

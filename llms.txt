@@ -30,7 +30,7 @@ Top-level commands in `bin/fireclaw`:
 
 - `doctor`: host prerequisite checks (commands, /dev/kvm, base images, bridge/NAT, capacity)
 - `setup`: create + provision new VM; `--telegram-token` is optional (omit for a local-only gateway with Telegram disabled), default model is `openai/gpt-5.5`, and the model's provider API key is required up front
-- `provision`: update saved config and re-run guest provisioning for an existing VM; supports `--telegram-token`, `--telegram-users`, `--model`, `--skills`, `--openclaw-image`, the three API-key flags, and `--skip-browser-install`
+- `provision`: update saved config and re-run guest provisioning for an existing VM; supports `--telegram-token`, `--no-telegram`, `--telegram-users`, `--model`, `--skills`, `--openclaw-image`, the three API-key flags, `--skip-browser-install`, and `--browser-install`; overrides are validated before being persisted
 - `list`, `status`, `start`, `stop`, `restart`, `logs`, `shell`, `token`, `destroy`
 - `stop` disables units so stopped instances stay stopped across host reboots; `start` re-enables them
 
@@ -87,7 +87,7 @@ Defaults:
 - `SUBNET_CIDR=172.16.0.0/24`
 - `BASE_PORT=18890` (first auto proxy port is 18891)
 
-OpenClaw gateway binds inside the guest on `0.0.0.0:18789`, so it is reachable at `<VM_IP>:18789` from the host. Host proxy access binds `127.0.0.1:<HOST_PORT>` and forwards to `<VM_IP>:18789`. Intra-bridge traffic is dropped (iptables `FORWARD -i fc-br0 -o fc-br0 DROP`), so instances cannot reach each other.
+OpenClaw gateway binds inside the guest on `0.0.0.0:18789`, so it is reachable at `<VM_IP>:18789` from the host. Host proxy access binds `127.0.0.1:<HOST_PORT>` and forwards to `<VM_IP>:18789`. Each tap is an isolated bridge port (`bridge link set dev <tap> isolated on`), so instances cannot exchange IP or ARP traffic with each other; an intra-bridge iptables FORWARD drop adds defense-in-depth where br_netfilter is enabled.
 
 Automatic VM IP allocation currently supports `/24` subnets.
 

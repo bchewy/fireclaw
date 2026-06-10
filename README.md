@@ -210,7 +210,7 @@ Enable Telegram on an instance created local-only (or fix an empty allowlist):
 sudo fireclaw provision my-bot --telegram-token "<token>" --telegram-users "<comma-separated-allowed-user-ids>"
 ```
 
-`provision` accepts `--telegram-token`, `--telegram-users`, `--model`, `--skills`, `--openclaw-image`, `--anthropic-api-key`, `--openai-api-key`, `--minimax-api-key`, and `--skip-browser-install`.
+`provision` accepts `--telegram-token`, `--no-telegram` (clear the saved token and disable Telegram), `--telegram-users`, `--model`, `--skills`, `--openclaw-image`, `--anthropic-api-key`, `--openai-api-key`, `--minimax-api-key`, `--skip-browser-install`, and `--browser-install`. Overrides are validated against the saved config before anything is persisted, so a rejected run leaves the instance unchanged.
 
 ## Setup flags
 
@@ -222,7 +222,7 @@ sudo fireclaw provision my-bot --telegram-token "<token>" --telegram-users "<com
 | `--model <id>` | no | `openai/gpt-5.5` | OpenClaw model; its provider API key must be set |
 | `--skills <csv>` | no | `github,tmux,coding-agent,session-logs,skill-creator` | Skill set |
 | `--openclaw-image <image>` | no | `ghcr.io/openclaw/openclaw:latest` | OpenClaw container image |
-| `--host-port <n>` | no | first free port above `BASE_PORT` | Host localhost proxy port |
+| `--host-port <n>` | no | first free port above `BASE_PORT` | Host localhost proxy port (>= 1024; the proxy runs unprivileged) |
 | `--vm-vcpu <n>` | no | `4` | VM vCPU count |
 | `--vm-mem-mib <n>` | no | `8192` | VM memory in MiB |
 | `--disk-size <size>` | no | `40G` | Rootfs resize target |
@@ -257,7 +257,7 @@ Access model:
 
 - Guest service listens inside VM on `0.0.0.0:18789` and is reachable at `<VM_IP>:18789` from the host.
 - Host proxy binds `127.0.0.1:<HOST_PORT>` (running as an unprivileged dynamic user) and forwards to `<VM_IP>:18789`.
-- Instances cannot reach each other: bridge/NAT setup installs an iptables `FORWARD` drop for intra-bridge traffic, so VMs only talk to the host and (via NAT) the internet.
+- Instances cannot reach each other: each tap joins the bridge as an isolated port (`bridge link set dev <tap> isolated on`), which blocks VM-to-VM IP and ARP at L2 while still allowing host and NATed internet traffic. An intra-bridge iptables `FORWARD` drop adds defense-in-depth on hosts with `br_netfilter` enabled.
 - Default host access is localhost-bound through the proxy, but the VM gateway is not itself localhost-only. Keep the VM subnet and bridge routing/firewalling private.
 
 ## State layout
@@ -391,7 +391,7 @@ Contribution expectations:
 
 - Strong isolation boundary is the VM, not a container namespace.
 - No host Docker socket mount into guest containers.
-- Instances cannot reach each other on the bridge (iptables intra-bridge `FORWARD` drop); each VM sees only the host gateway and NATed egress.
+- Instances cannot reach each other on the bridge (isolated bridge ports block both IP and ARP between guests); each VM sees only the host gateway and NATed egress.
 - The host proxy is localhost-only and runs as an unprivileged dynamic user. The guest gateway also listens on the VM network, so bridge/subnet reachability is part of the security boundary.
 - Guest SSH host keys are pinned on first contact in the per-instance `known_hosts` file, so later connections detect host-key changes.
 - Secrets are stored per instance under `STATE_ROOT`; instance state and VM asset directories are created root-only. The gateway token is not echoed by `setup`; print it explicitly with `fireclaw token <id>`. Prefer passing API keys via environment variables over flags to keep them out of `ps` output.

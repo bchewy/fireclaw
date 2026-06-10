@@ -177,7 +177,7 @@ VM_MEM_MIB=$((10#$VM_MEM_MIB))
 require_model_provider_key "$MODEL"
 
 require_root
-for c in firecracker systemctl ip iptables openssl jq cloud-localds ssh scp socat curl qemu-img install flock; do
+for c in firecracker systemctl ip bridge iptables openssl jq cloud-localds ssh scp socat curl qemu-img install flock; do
   require_cmd "$c"
 done
 FIRECRACKER_BIN="$(command -v firecracker)"
@@ -377,12 +377,16 @@ ip -4 addr show dev "\$BRIDGE_NAME" | grep -Fq " \$BRIDGE_ADDR " || ip addr add 
 ip link set "\$BRIDGE_NAME" up
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 iptables -t nat -C POSTROUTING -s "\$SUBNET_CIDR" ! -o "\$BRIDGE_NAME" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "\$SUBNET_CIDR" ! -o "\$BRIDGE_NAME" -j MASQUERADE
+# Defense-in-depth only: matches solely where br_netfilter is enabled.
 iptables -C FORWARD -i "\$BRIDGE_NAME" -o "\$BRIDGE_NAME" -j DROP 2>/dev/null || iptables -I FORWARD 1 -i "\$BRIDGE_NAME" -o "\$BRIDGE_NAME" -j DROP
 
 if ! ip link show "\$VM_TAP" >/dev/null 2>&1; then
   ip tuntap add dev "\$VM_TAP" mode tap user root
 fi
 ip link set "\$VM_TAP" master "\$BRIDGE_NAME"
+# Isolated bridge ports cannot exchange frames (IP or ARP) with each other,
+# only with the bridge/host itself — this is the actual VM-to-VM isolation.
+bridge link set dev "\$VM_TAP" isolated on
 ip link set "\$VM_TAP" up
 
 rm -f "\$API_SOCK"

@@ -77,7 +77,7 @@ sudo fireclaw provision <id> --model openai/gpt-5.5 --openai-api-key "<key>"
 sudo fireclaw provision <id> --telegram-token "<token>" --telegram-users "<ids>"
 ```
 
-Accepts: `--telegram-token`, `--telegram-users`, `--model`, `--skills`, `--openclaw-image`, `--anthropic-api-key`, `--openai-api-key`, `--minimax-api-key`, `--skip-browser-install`.
+Accepts: `--telegram-token`, `--no-telegram`, `--telegram-users`, `--model`, `--skills`, `--openclaw-image`, `--anthropic-api-key`, `--openai-api-key`, `--minimax-api-key`, `--skip-browser-install`, `--browser-install`. Overrides are validated before being persisted.
 
 ### fireclaw (lifecycle)
 
