@@ -20,10 +20,10 @@ Host
 ├── bridge: fc-br0 (172.16.0.0/24)
 │
 └── Firecracker VM (172.16.0.x)
-    ├── cloud-init → ubuntu user, SSH key, Docker
-    ├── Docker → OpenClaw container image
+    ├── cloud-init → ubuntu user, SSH key, base packages
+    ├── Docker → installed/configured by guest provisioning, runs OpenClaw container image
     ├── systemd: openclaw-<id>.service → gateway on port 18789
-    └── Browser binaries (Puppeteer + Playwright)
+    └── Playwright Chromium (unless --skip-browser-install)
 ```
 
 State locations:
@@ -37,39 +37,58 @@ State locations:
 One-shot instance creator. Must run as root.
 
 ```bash
+# Local-only gateway (Telegram disabled):
+sudo fireclaw setup \
+  --instance <id> \
+  --model "openai/gpt-5.5" \
+  --openai-api-key "<key>"
+
+# Telegram bot instance:
 sudo fireclaw setup \
   --instance <id> \
   --telegram-token "<token>" \
   --telegram-users "<user-ids>" \
-  --model "openai/gpt-5.4" \
+  --model "openai/gpt-5.5" \
   --openai-api-key "<key>"
 ```
 
-Flow: validates inputs → generates SSH key → allocates IP + port → copies rootfs → generates cloud-init seed → writes Firecracker config → creates systemd units → boots VM → waits for SSH → SCPs provision-guest.sh into VM → runs it → enables proxy → polls health.
+Flow: validates inputs (the model's provider API key is required, e.g. `openai/*` needs `--openai-api-key` or `OPENAI_API_KEY`) → generates SSH key → allocates IP + port under a lock → copies rootfs → generates cloud-init seed → writes Firecracker config → creates systemd units → boots VM → waits for SSH → SCPs provision-guest.sh into VM → runs it → enables proxy → polls health. After guest provisioning succeeds, a failed health gate keeps the instance for inspection instead of rolling it back.
 
 Options:
 
 | Flag | Default |
 |------|---------|
 | `--instance` | required, `[a-z0-9_-]+` |
-| `--telegram-token` | required |
-| `--telegram-users` | comma-separated IDs |
-| `--model` | `openai/gpt-5.4` |
+| `--telegram-token` | optional; omit for a local-only gateway with Telegram disabled |
+| `--telegram-users` | comma-separated IDs; required with `--telegram-token` |
+| `--model` | `openai/gpt-5.5` |
 | `--skills` | `github,tmux,coding-agent,session-logs,skill-creator` |
 | `--openclaw-image` | `ghcr.io/openclaw/openclaw:latest` |
 | `--vm-vcpu` | `4` |
 | `--vm-mem-mib` | `8192` |
 | `--skip-browser-install` | `false` |
 
+### fireclaw provision
+
+Updates saved instance config and reruns guest provisioning (no new IP/port/disk):
+
+```bash
+sudo fireclaw provision <id> --model openai/gpt-5.5 --openai-api-key "<key>"
+sudo fireclaw provision <id> --telegram-token "<token>" --telegram-users "<ids>"
+```
+
+Accepts: `--telegram-token`, `--no-telegram`, `--telegram-users`, `--model`, `--skills`, `--openclaw-image`, `--anthropic-api-key`, `--openai-api-key`, `--minimax-api-key`, `--skip-browser-install`, `--browser-install`. Overrides are validated before being persisted.
+
 ### fireclaw (lifecycle)
 
 Most commands require root.
 
 ```bash
+sudo fireclaw doctor                  # check host prerequisites (KVM, commands, images, bridge)
 sudo fireclaw list                    # all instances with health
 sudo fireclaw status <id>             # detailed status including guest service
 sudo fireclaw start <id>              # boot VM + start guest + enable proxy
-sudo fireclaw stop <id>               # graceful shutdown (guest → VM → proxy)
+sudo fireclaw stop <id>               # graceful shutdown (proxy → guest → VM); stays stopped across host reboots
 sudo fireclaw restart <id>            # stop then start
 sudo fireclaw logs <id>               # tail guest (OpenClaw) logs via SSH
 sudo fireclaw logs <id> host          # tail host (Firecracker + proxy) logs
@@ -77,7 +96,7 @@ sudo fireclaw shell <id>              # SSH into VM
 sudo fireclaw shell <id> "command"    # run command inside VM
 sudo fireclaw token <id>              # print gateway token
 sudo fireclaw destroy <id>            # interactive destroy
-sudo fireclaw destroy <id> --force    # skip confirmation
+sudo fireclaw destroy <id> --force    # skip confirmation; also cleans up unreadable state
 ```
 
 ### Internal: bin/vm-common.sh
@@ -86,7 +105,7 @@ Shared library sourced by all scripts. Provides: path helpers, instance ID valid
 
 ### scripts/provision-guest.sh
 
-Runs inside the VM as root. Installs Docker, pulls OpenClaw image, configures via CLI (gateway auth, Telegram bot, model, skills, browser paths), creates and starts guest systemd service.
+Runs inside the VM as root. Installs Docker, pulls OpenClaw image, configures via CLI (gateway auth, model, skills, browser paths; Telegram is enabled only when a token is configured, otherwise explicitly disabled), creates and starts guest systemd service.
 
 ## Debugging
 
@@ -110,7 +129,7 @@ If an instance is unhealthy:
 | `BRIDGE_NAME` | `fc-br0` |
 | `BRIDGE_ADDR` | `172.16.0.1/24` |
 | `SUBNET_CIDR` | `172.16.0.0/24` |
-| `SSH_KEY_PATH` | `~/.ssh/vmdemo_vm` |
+| `SSH_KEY_PATH` | `/home/ubuntu/.ssh/vmdemo_vm` |
 | `BASE_IMAGES_DIR` | `/srv/firecracker/base/images` |
 
 ## Modifying Scripts

@@ -189,6 +189,49 @@ EOF
   fi
 }
 
+test_load_instance_env_resets_values_between_instances() {
+  local state="$TMP_ROOT/state-env-reset"
+  mkdir -p "$state/.vm-a" "$state/.vm-b"
+  cat > "$state/.vm-a/.env" <<'EOF'
+INSTANCE_ID=a
+MODEL=anthropic/claude-opus-4-6
+EOF
+  cat > "$state/.vm-b/.env" <<'EOF'
+INSTANCE_ID=b
+EOF
+
+  STATE_ROOT="$state" bash -c 'source "$1"; load_instance_env a; load_instance_env b; [[ -z "$MODEL" ]]' _ "$VM_COMMON"
+}
+
+test_require_model_provider_key_rejects_missing_key() {
+  if OPENAI_API_KEY="" bash -c 'source "$1"; require_model_provider_key "openai/gpt-5.5"' _ "$VM_COMMON" >/dev/null 2>&1; then
+    echo "Expected openai model without OPENAI_API_KEY to be rejected" >&2
+    return 1
+  fi
+}
+
+test_require_model_provider_key_accepts_matching_key() {
+  ANTHROPIC_API_KEY="k" bash -c 'source "$1"; require_model_provider_key "anthropic/claude-opus-4-6"' _ "$VM_COMMON"
+}
+
+test_require_model_provider_key_ignores_unknown_provider() {
+  bash -c 'source "$1"; require_model_provider_key "custom/some-model"' _ "$VM_COMMON"
+}
+
+test_ssh_known_hosts_file_defaults_to_dev_null() {
+  local actual
+  actual="$(bash -c 'source "$1"; ssh_known_hosts_file ""' _ "$VM_COMMON")"
+  assert_eq "/dev/null" "$actual" "ssh_known_hosts_file without an instance should return /dev/null"
+}
+
+test_ssh_known_hosts_file_uses_instance_dir() {
+  local state="$TMP_ROOT/state-known-hosts"
+  mkdir -p "$state/.vm-a"
+  local actual
+  actual="$(STATE_ROOT="$state" bash -c 'source "$1"; ssh_known_hosts_file a' _ "$VM_COMMON")"
+  assert_eq "$state/.vm-a/known_hosts" "$actual" "ssh_known_hosts_file should point inside the instance dir"
+}
+
 run_test "validate_instance_id accepts valid IDs" test_validate_instance_id_accepts_valid
 run_test "validate_instance_id rejects invalid IDs" test_validate_instance_id_rejects_invalid
 run_test "validate_host_port rejects out-of-range values" test_validate_host_port_rejects_out_of_range
@@ -203,6 +246,12 @@ run_test "next_ip rejects bridge outside subnet" test_next_ip_rejects_bridge_out
 run_test "subnet_mask_bits rejects non-/24 values" test_subnet_mask_bits_rejects_non_24
 run_test "subnet_prefix rejects invalid octets" test_subnet_prefix_rejects_invalid_octets
 run_test "load_instance_env treats values as data" test_load_instance_env_treats_values_as_data
+run_test "load_instance_env resets values between instances" test_load_instance_env_resets_values_between_instances
+run_test "require_model_provider_key rejects missing key" test_require_model_provider_key_rejects_missing_key
+run_test "require_model_provider_key accepts matching key" test_require_model_provider_key_accepts_matching_key
+run_test "require_model_provider_key ignores unknown provider" test_require_model_provider_key_ignores_unknown_provider
+run_test "ssh_known_hosts_file defaults to /dev/null" test_ssh_known_hosts_file_defaults_to_dev_null
+run_test "ssh_known_hosts_file uses instance dir" test_ssh_known_hosts_file_uses_instance_dir
 
 if (( FAILURES > 0 )); then
   echo

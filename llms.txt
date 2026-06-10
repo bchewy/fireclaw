@@ -28,9 +28,11 @@ State split:
 
 Top-level commands in `bin/fireclaw`:
 
-- `setup`: create + provision new VM
-- `provision`: re-run guest provisioning for existing VM; supports `--telegram-users <csv>` to update/migrate saved allowlists
+- `doctor`: host prerequisite checks (commands, /dev/kvm, base images, bridge/NAT, capacity)
+- `setup`: create + provision new VM; `--telegram-token` is optional (omit for a local-only gateway with Telegram disabled), default model is `openai/gpt-5.5`, and the model's provider API key is required up front
+- `provision`: update saved config and re-run guest provisioning for an existing VM; supports `--telegram-token`, `--no-telegram`, `--telegram-users`, `--model`, `--skills`, `--openclaw-image`, the three API-key flags, `--skip-browser-install`, and `--browser-install`; overrides are validated before being persisted
 - `list`, `status`, `start`, `stop`, `restart`, `logs`, `shell`, `token`, `destroy`
+- `stop` disables units so stopped instances stay stopped across host reboots; `start` re-enables them
 
 Implementation files:
 
@@ -50,20 +52,22 @@ Important helpers:
   - `ensure_host_port_available`: validates explicit user-chosen host port
   - `next_ip`: first free VM IP in configured `/24` subnet, reserving bridge gateway
 - Network parsing: `subnet_mask_bits`, `subnet_prefix`, `bridge_gateway_ip`
-- Connectivity/health: `wait_for_ssh`, `check_guest_health`
+- Connectivity/health: `wait_for_ssh` (returns non-zero on failure; tolerates `activating` unit states), `check_guest_health`
+- SSH host-key pinning: `ssh_known_hosts_file` returns the per-instance `known_hosts` path used by all ssh/scp calls
+- Model/key coupling: `require_model_provider_key` fails fast when the chosen model's provider API key is empty
 - Readiness gate: `wait_for_instance_health` requires both guest health and localhost proxy health before setup/provision/start report success.
 
 ## `setup` flow highlights (`bin/vm-setup`)
 
-1. Parse flags and validate required values.
-2. Validate host dependencies.
-3. Resolve host port (`--host-port` or automatic).
-4. Resolve VM IP from `SUBNET_CIDR` + `BRIDGE_ADDR`.
+1. Parse flags and validate required values (including model-to-API-key coupling).
+2. Validate host dependencies, `/dev/kvm`, and warn when VM memory exceeds `MemAvailable`.
+3. Resolve host port (`--host-port` or automatic) and VM IP under a `flock` on `STATE_ROOT/.alloc.lock`, held until the reservation is written to `.env`.
+4. Fail fast if the derived tap device already exists.
 5. Generate cloud-init and Firecracker config.
-6. Create host systemd units for VM and proxy.
+6. Create host systemd units for VM (`Restart=always`, graceful guest shutdown in `ExecStop` via the Firecracker API) and proxy (`DynamicUser=yes`, `PartOf` the VM unit).
 7. Boot VM, wait for SSH, run guest provision script.
 8. Enable proxy and verify host/guest health.
-9. On setup failure after state creation, rollback stops/disables temporary units, removes the tap, reloads systemd, and deletes only that instance's partial state/assets.
+9. On setup failure before guest provisioning completes, rollback stops/disables temporary units, removes the tap and API socket, reloads systemd, and deletes only that instance's partial state/assets. After guest provisioning succeeds, failures keep the instance (recoverable via `fireclaw provision`).
 
 Notable flags:
 
@@ -83,7 +87,7 @@ Defaults:
 - `SUBNET_CIDR=172.16.0.0/24`
 - `BASE_PORT=18890` (first auto proxy port is 18891)
 
-OpenClaw gateway binds inside the guest on `0.0.0.0:18789`, so it is reachable at `<VM_IP>:18789` wherever the Firecracker bridge/subnet permits. Host proxy access binds `127.0.0.1:<HOST_PORT>` and forwards to `<VM_IP>:18789`.
+OpenClaw gateway binds inside the guest on `0.0.0.0:18789`, so it is reachable at `<VM_IP>:18789` from the host. Host proxy access binds `127.0.0.1:<HOST_PORT>` and forwards to `<VM_IP>:18789`. Each tap is an isolated bridge port (`bridge link set dev <tap> isolated on`), so instances cannot exchange IP or ARP traffic with each other; an intra-bridge iptables FORWARD drop adds defense-in-depth where br_netfilter is enabled.
 
 Automatic VM IP allocation currently supports `/24` subnets.
 

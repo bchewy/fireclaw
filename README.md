@@ -78,11 +78,13 @@ The stable runtime names still include `vmdemo` (`/srv/firecracker/vm-demo`, `fi
 
 Lifecycle behavior:
 
-- `setup` validates inputs, allocates a host port and VM IP, writes root-only instance state, builds Firecracker assets, creates host systemd units, boots the VM, waits for SSH, then SCPs `provision-guest.sh` and `provision.vars` into `/tmp` for guest setup. It returns success only after both the localhost proxy and guest health checks pass.
-- Failed `setup` rolls back only the instance being created: temporary units are stopped/removed, the tap is deleted when present, systemd is reloaded, and partial state/assets are removed.
-- `provision <id>` reuses an existing VM and saved `provision.vars`. It can update `TELEGRAM_USERS`, reruns guest provisioning, rewrites OpenClaw config, restarts `openclaw-<id>.service`, re-enables the proxy, and requires the same guest + proxy health gate. It does not allocate a new IP, port, or disk.
+- `setup` validates inputs (including that the chosen model's provider API key is present), allocates a host port and VM IP under a lock, writes root-only instance state, builds Firecracker assets, creates host systemd units, boots the VM, waits for SSH, then SCPs `provision-guest.sh` and `provision.vars` into `/tmp` for guest setup. It returns success only after both the localhost proxy and guest health checks pass.
+- A `setup` failure *before* guest provisioning completes rolls back only the instance being created: temporary units are stopped/removed, the tap and API socket are deleted when present, systemd is reloaded, and partial state/assets are removed. After guest provisioning succeeds, a failed health gate keeps the instance so it can be inspected and retried with `fireclaw provision <id>`.
+- `provision <id>` reuses an existing VM and saved `provision.vars`. Flags update the saved config (Telegram token/users, model, skills, image, API keys), then guest provisioning reruns, rewrites OpenClaw config, restarts `openclaw-<id>.service`, re-enables the proxy, and requires the same guest + proxy health gate. It does not allocate a new IP, port, or disk.
 - `start <id>` starts the existing VM unit, waits for SSH, starts the existing guest service and proxy, then health-gates. It does not reprovision.
-- `stop <id>` stops proxy first, then guest service when SSH is reachable, then the VM. `destroy <id>` removes host units plus state/assets.
+- `stop <id>` stops proxy first, then guest service when SSH is reachable, then the VM (the guest is asked to shut down cleanly via the Firecracker API before the VMM exits). Stopped instances are also disabled, so they stay stopped across host reboots until `fireclaw start`.
+- The VM unit uses `Restart=always`: an in-guest reboot or VMM crash brings the instance back automatically while it is started.
+- `destroy <id>` removes host units, the tap device, the API socket, plus state/assets. `--force` also handles instances whose state files are unreadable.
 
 Builder caveats:
 
@@ -114,18 +116,47 @@ Default base image directory is `/srv/firecracker/base/images`.
 npm install -g fireclaw
 ```
 
+If `sudo fireclaw` reports `command not found` (common with nvm/fnm/user-prefix npm installs, where the global bin dir is not on root's `secure_path`), link it once:
+
+```bash
+sudo ln -s "$(command -v fireclaw)" /usr/local/bin/fireclaw
+```
+
 ## Quick start
+
+Check the host first:
+
+```bash
+sudo fireclaw doctor
+```
+
+Create a local-only gateway instance (Telegram disabled):
+
+```bash
+sudo fireclaw setup \
+  --instance my-bot \
+  --model "openai/gpt-5.5" \
+  --openai-api-key "<key>"
+```
+
+Or a Telegram bot instance:
 
 ```bash
 sudo fireclaw setup \
   --instance my-bot \
   --telegram-token "<telegram-bot-token>" \
   --telegram-users "<comma-separated-allowed-user-ids>" \
-  --model "openai/gpt-5.4" \
+  --model "openai/gpt-5.5" \
   --openai-api-key "<key>"
 ```
 
-Telegram DMs use an allowlist and groups are disabled. Provide at least one user ID with `--telegram-users`; guest provisioning fails if the allowlist is empty.
+Telegram DMs use an allowlist and groups are disabled. With `--telegram-token`, provide at least one user ID with `--telegram-users`; guest provisioning fails if the allowlist is empty. Setup also fails fast if the chosen model's provider key is missing (`openai/*` needs an OpenAI key, `anthropic/*` an Anthropic key, `minimax/*` a MiniMax key).
+
+API keys can be passed as environment variables instead of flags so they do not appear in `ps` output or shell history:
+
+```bash
+sudo OPENAI_API_KEY="<key>" fireclaw setup --instance my-bot
+```
 
 Check status and health:
 
@@ -137,8 +168,9 @@ curl -fsS http://127.0.0.1:<HOST_PORT>/health
 ## Command reference
 
 ```bash
+fireclaw doctor
 fireclaw setup <flags...>
-fireclaw provision <id> [--telegram-users <csv>]
+fireclaw provision <id> [flags...]
 fireclaw list
 fireclaw status [id]
 fireclaw start <id>
@@ -164,29 +196,33 @@ sudo fireclaw restart my-bot
 sudo fireclaw destroy my-bot --force
 ```
 
-Reprovision an existing VM guest:
+Reprovision an existing VM guest (optionally updating saved config first):
 
 ```bash
 sudo fireclaw provision my-bot
+sudo fireclaw provision my-bot --model openai/gpt-5.5
+sudo fireclaw provision my-bot --openai-api-key "<rotated-key>"
 ```
 
-For older instances created without an allowlist, set it during reprovision:
+Enable Telegram on an instance created local-only (or fix an empty allowlist):
 
 ```bash
-sudo fireclaw provision my-bot --telegram-users "<comma-separated-allowed-user-ids>"
+sudo fireclaw provision my-bot --telegram-token "<token>" --telegram-users "<comma-separated-allowed-user-ids>"
 ```
+
+`provision` accepts `--telegram-token`, `--no-telegram` (clear the saved token and disable Telegram), `--telegram-users`, `--model`, `--skills`, `--openclaw-image`, `--anthropic-api-key`, `--openai-api-key`, `--minimax-api-key`, `--skip-browser-install`, and `--browser-install`. Overrides are validated against the saved config before anything is persisted, so a rejected run leaves the instance unchanged.
 
 ## Setup flags
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--instance <id>` | yes | - | Instance ID (`[a-z0-9_-]+`) |
-| `--telegram-token <token>` | yes | - | Telegram bot token |
-| `--telegram-users <csv>` | yes | - | Allowed Telegram user IDs; provisioning fails if empty |
-| `--model <id>` | no | `openai/gpt-5.4` | OpenClaw model |
+| `--telegram-token <token>` | no | - | Telegram bot token; omit for a local-only gateway with Telegram disabled |
+| `--telegram-users <csv>` | with `--telegram-token` | - | Allowed Telegram user IDs; provisioning fails if empty |
+| `--model <id>` | no | `openai/gpt-5.5` | OpenClaw model; its provider API key must be set |
 | `--skills <csv>` | no | `github,tmux,coding-agent,session-logs,skill-creator` | Skill set |
 | `--openclaw-image <image>` | no | `ghcr.io/openclaw/openclaw:latest` | OpenClaw container image |
-| `--host-port <n>` | no | first free port above `BASE_PORT` | Host localhost proxy port |
+| `--host-port <n>` | no | first free port above `BASE_PORT` | Host localhost proxy port (>= 1024; the proxy runs unprivileged) |
 | `--vm-vcpu <n>` | no | `4` | VM vCPU count |
 | `--vm-mem-mib <n>` | no | `8192` | VM memory in MiB |
 | `--disk-size <size>` | no | `40G` | Rootfs resize target |
@@ -219,8 +255,9 @@ Allocation behavior:
 
 Access model:
 
-- Guest service listens inside VM on `0.0.0.0:18789` and is reachable at `<VM_IP>:18789` wherever the Firecracker bridge/subnet permits.
-- Host proxy binds `127.0.0.1:<HOST_PORT>` and forwards to `<VM_IP>:18789`.
+- Guest service listens inside VM on `0.0.0.0:18789` and is reachable at `<VM_IP>:18789` from the host.
+- Host proxy binds `127.0.0.1:<HOST_PORT>` (running as an unprivileged dynamic user) and forwards to `<VM_IP>:18789`.
+- Instances cannot reach each other: each tap joins the bridge as an isolated port (`bridge link set dev <tap> isolated on`), which blocks VM-to-VM IP and ARP at L2 while still allowing host and NATed internet traffic. An intra-bridge iptables `FORWARD` drop adds defense-in-depth on hosts with `br_netfilter` enabled.
 - Default host access is localhost-bound through the proxy, but the VM gateway is not itself localhost-only. Keep the VM subnet and bridge routing/firewalling private.
 
 ## State layout
@@ -230,6 +267,7 @@ Per-instance control state:
 - `/var/lib/fireclaw/.vm-<id>/.env`
 - `/var/lib/fireclaw/.vm-<id>/.token`
 - `/var/lib/fireclaw/.vm-<id>/provision.vars`
+- `/var/lib/fireclaw/.vm-<id>/known_hosts` (pinned guest SSH host key)
 
 These files contain tokens/API keys and are written with `0600` permissions under an instance directory with `0700` permissions.
 
@@ -292,12 +330,12 @@ sudo fireclaw start my-bot
 sudo fireclaw provision my-bot
 ```
 
-Provisioning rewrites guest config and restarts `openclaw-my-bot.service`; use it after changing saved env/config/image values.
+Provisioning rewrites guest config and restarts `openclaw-my-bot.service`; pass flags (`--model`, `--openai-api-key`, ...) to update saved values in the same run.
 
 Health gating:
 
 - `setup`, `provision`, and `start` require both the guest health script and the localhost proxy `/health` endpoint to pass before returning success.
-- A failed `setup` rolls back only the instance it was creating. It does not touch existing instances.
+- A `setup` that fails before guest provisioning completes rolls back only the instance it was creating; it never touches existing instances. After guest provisioning succeeds, failures keep the instance for inspection.
 - Guest-side `/tmp/provision.vars` and `/tmp/provision-guest.sh` are removed after provisioning exits.
 
 ## Troubleshooting
@@ -353,6 +391,8 @@ Contribution expectations:
 
 - Strong isolation boundary is the VM, not a container namespace.
 - No host Docker socket mount into guest containers.
-- The host proxy is localhost-only by default, reducing remote host attack surface. The guest gateway also listens on the VM network, so bridge/subnet reachability is part of the security boundary.
-- Secrets are stored per instance under `STATE_ROOT`; instance state and VM asset directories are created root-only.
+- Instances cannot reach each other on the bridge (isolated bridge ports block both IP and ARP between guests); each VM sees only the host gateway and NATed egress.
+- The host proxy is localhost-only and runs as an unprivileged dynamic user. The guest gateway also listens on the VM network, so bridge/subnet reachability is part of the security boundary.
+- Guest SSH host keys are pinned on first contact in the per-instance `known_hosts` file, so later connections detect host-key changes.
+- Secrets are stored per instance under `STATE_ROOT`; instance state and VM asset directories are created root-only. The gateway token is not echoed by `setup`; print it explicitly with `fireclaw token <id>`. Prefer passing API keys via environment variables over flags to keep them out of `ps` output.
 - Provisioning copies secrets into the guest only long enough to run the guest script, then removes the temporary files from `/tmp`.

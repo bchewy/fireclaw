@@ -8,11 +8,12 @@ CMD_NAME="${VM_SETUP_CMD_NAME:-fireclaw setup}"
 
 usage() {
   cat <<EOF
-Usage: $CMD_NAME --instance <id> --telegram-token <token> --telegram-users <csv> [options]
+Usage: $CMD_NAME --instance <id> [options]
 
 Options:
-  --telegram-users <csv>
-  --model <id>                         (default: openai/gpt-5.4)
+  --telegram-token <token>             (optional; omit for a local-only gateway with Telegram disabled)
+  --telegram-users <csv>               (required with --telegram-token)
+  --model <id>                         (default: openai/gpt-5.5)
   --skills <csv>                       (default: github,tmux,coding-agent,session-logs,skill-creator)
   --openclaw-image <image>
   --host-port <n>                      (default: first free port above BASE_PORT)
@@ -65,7 +66,7 @@ write_kv() {
 INSTANCE=""
 TELEGRAM_TOKEN=""
 TELEGRAM_USERS=""
-MODEL="${MODEL:-openai/gpt-5.4}"
+MODEL="${MODEL:-openai/gpt-5.5}"
 SKILLS="${SKILLS:-github,tmux,coding-agent,session-logs,skill-creator}"
 OPENCLAW_IMAGE="$OPENCLAW_IMAGE_DEFAULT"
 VM_VCPU="${VM_VCPU:-4}"
@@ -106,6 +107,9 @@ cleanup_failed_setup() {
       ip link set "$VM_TAP" down 2>/dev/null || true
       ip link del "$VM_TAP" 2>/dev/null || true
     fi
+    if [[ -n "${API_SOCK:-}" ]]; then
+      rm -f "$API_SOCK"
+    fi
     if [[ -n "${inst_dir:-}" ]]; then
       rm -rf "$inst_dir"
     fi
@@ -143,9 +147,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$INSTANCE" ]] || die "Missing --instance"
-[[ -n "$TELEGRAM_TOKEN" ]] || die "Missing --telegram-token"
-[[ -n "$TELEGRAM_USERS" ]] || die "Missing --telegram-users"
-[[ -n "$(csv_values "$TELEGRAM_USERS")" ]] || die "--telegram-users must include at least one allowed Telegram user ID"
+if [[ -n "$TELEGRAM_TOKEN" ]]; then
+  [[ -n "$TELEGRAM_USERS" ]] || die "Missing --telegram-users (required with --telegram-token)"
+  [[ -n "$(csv_values "$TELEGRAM_USERS")" ]] || die "--telegram-users must include at least one allowed Telegram user ID"
+elif [[ -n "$TELEGRAM_USERS" ]]; then
+  die "--telegram-users requires --telegram-token"
+fi
 validate_instance_id "$INSTANCE"
 validate_positive_int "VM_VCPU" "$VM_VCPU"
 validate_positive_int "VM_MEM_MIB" "$VM_MEM_MIB"
@@ -167,13 +174,20 @@ if [[ -n "$HOST_PORT_OVERRIDE" ]]; then
 fi
 VM_VCPU=$((10#$VM_VCPU))
 VM_MEM_MIB=$((10#$VM_MEM_MIB))
+require_model_provider_key "$MODEL"
 
 require_root
-for c in firecracker systemctl ip iptables openssl jq cloud-localds ssh scp socat curl qemu-img install; do
+for c in firecracker systemctl ip bridge iptables openssl jq cloud-localds ssh scp socat curl qemu-img install flock; do
   require_cmd "$c"
 done
 FIRECRACKER_BIN="$(command -v firecracker)"
 [[ "$FIRECRACKER_BIN" = /* ]] || die "firecracker must resolve to an absolute executable path"
+[[ -e /dev/kvm && -r /dev/kvm && -w /dev/kvm ]] || die "/dev/kvm is not available (KVM is required to run Firecracker VMs)"
+
+mem_avail_mib="$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+if (( mem_avail_mib > 0 && VM_MEM_MIB > mem_avail_mib )); then
+  warn "Requested VM memory (${VM_MEM_MIB} MiB) exceeds host MemAvailable (${mem_avail_mib} MiB); the VM may OOM the host"
+fi
 
 [[ -f "$BASE_KERNEL" ]] || die "Kernel not found: $BASE_KERNEL"
 [[ -f "$BASE_ROOTFS" ]] || die "Rootfs not found: $BASE_ROOTFS"
@@ -201,6 +215,11 @@ PROXY_SVC="$(proxy_service "$INSTANCE")"
 [[ ! -e "/etc/systemd/system/$PROXY_SVC" ]] || die "Proxy unit already exists: /etc/systemd/system/$PROXY_SVC"
 CLEANUP_ARMED="true"
 
+# Hold the allocation lock until the reservation is visible in the .env file,
+# so concurrent setups cannot pick the same port/IP.
+exec {ALLOC_LOCK_FD}>"$STATE_ROOT/.alloc.lock"
+flock "$ALLOC_LOCK_FD"
+
 if [[ -n "$HOST_PORT_OVERRIDE" ]]; then
   ensure_host_port_available "$HOST_PORT_OVERRIDE"
   HOST_PORT="$((10#$HOST_PORT_OVERRIDE))"
@@ -216,6 +235,10 @@ SHORT_ID="$(echo "$INSTANCE" | tr -cd 'a-z0-9' | cut -c1-6)"
 VM_TAP="t${SHORT_ID}${VM_OCTET}"
 VM_MAC="$(printf '06:fc:00:10:00:%02x' "$VM_OCTET")"
 GATEWAY_TOKEN="$(openssl rand -hex 32)"
+
+if ip link show "$VM_TAP" >/dev/null 2>&1; then
+  die "TAP device already exists: $VM_TAP (leftover from a previous instance? remove it with: sudo ip link del $VM_TAP)"
+fi
 
 mkdir -p "$inst_dir/config" "$inst_dir/workspace"
 chmod 700 "$inst_dir" "$inst_dir/config" "$inst_dir/workspace"
@@ -245,6 +268,8 @@ write_kv "$ENV_FILE" SKIP_BROWSER_INSTALL "$SKIP_BROWSER_INSTALL"
 write_kv "$ENV_FILE" ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
 write_kv "$ENV_FILE" OPENAI_API_KEY "$OPENAI_API_KEY"
 write_kv "$ENV_FILE" MINIMAX_API_KEY "$MINIMAX_API_KEY"
+
+exec {ALLOC_LOCK_FD}>&-
 
 install -m 600 /dev/null "$inst_dir/.token"
 printf '%s\n' "$GATEWAY_TOKEN" > "$inst_dir/.token"
@@ -352,9 +377,16 @@ ip -4 addr show dev "\$BRIDGE_NAME" | grep -Fq " \$BRIDGE_ADDR " || ip addr add 
 ip link set "\$BRIDGE_NAME" up
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 iptables -t nat -C POSTROUTING -s "\$SUBNET_CIDR" ! -o "\$BRIDGE_NAME" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s "\$SUBNET_CIDR" ! -o "\$BRIDGE_NAME" -j MASQUERADE
+# Defense-in-depth only: matches solely where br_netfilter is enabled.
+iptables -C FORWARD -i "\$BRIDGE_NAME" -o "\$BRIDGE_NAME" -j DROP 2>/dev/null || iptables -I FORWARD 1 -i "\$BRIDGE_NAME" -o "\$BRIDGE_NAME" -j DROP
 
-ip tuntap add dev "\$VM_TAP" mode tap user root 2>/dev/null || true
+if ! ip link show "\$VM_TAP" >/dev/null 2>&1; then
+  ip tuntap add dev "\$VM_TAP" mode tap user root
+fi
 ip link set "\$VM_TAP" master "\$BRIDGE_NAME"
+# Isolated bridge ports cannot exchange frames (IP or ARP) with each other,
+# only with the bridge/host itself — this is the actual VM-to-VM isolation.
+bridge link set dev "\$VM_TAP" isolated on
 ip link set "\$VM_TAP" up
 
 rm -f "\$API_SOCK"
@@ -366,8 +398,24 @@ cat > "$fc_dir/stop-vm.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 VM_TAP="$VM_TAP"
+API_SOCK="$API_SOCK"
+
+# Ask the guest to shut down cleanly (systemd maps Ctrl-Alt-Del to a clean
+# reboot, which exits Firecracker) before systemd kills the VMM, so the
+# rootfs ext4 is not torn down mid-write.
+if [[ -S "\$API_SOCK" ]]; then
+  if curl -fsS --max-time 2 --unix-socket "\$API_SOCK" -X PUT http://localhost/actions \\
+      -H 'Content-Type: application/json' -d '{"action_type": "SendCtrlAltDel"}' >/dev/null 2>&1; then
+    for _ in \$(seq 1 20); do
+      curl -fsS --max-time 1 --unix-socket "\$API_SOCK" http://localhost/ >/dev/null 2>&1 || break
+      sleep 1
+    done
+  fi
+fi
+
 ip link set "\$VM_TAP" down 2>/dev/null || true
 ip link del "\$VM_TAP" 2>/dev/null || true
+rm -f "\$API_SOCK"
 EOF
 chmod +x "$fc_dir/stop-vm.sh"
 
@@ -381,7 +429,8 @@ Wants=network-online.target
 Type=simple
 ExecStart=$fc_dir/start-vm.sh
 ExecStop=$fc_dir/stop-vm.sh
-Restart=on-failure
+TimeoutStopSec=45
+Restart=always
 RestartSec=2
 
 [Install]
@@ -393,15 +442,18 @@ cat > "/etc/systemd/system/$PROXY_SVC" <<EOF
 Description=Localhost proxy for VM ($INSTANCE)
 After=$VM_SVC
 Requires=$VM_SVC
+PartOf=$VM_SVC
 
 [Service]
 Type=simple
+DynamicUser=yes
 ExecStart=/usr/bin/socat TCP-LISTEN:$HOST_PORT,bind=127.0.0.1,reuseaddr,fork TCP:$VM_IP:18789
+SuccessExitStatus=143
 Restart=always
 RestartSec=2
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=multi-user.target $VM_SVC
 EOF
 
 systemctl daemon-reload
@@ -432,35 +484,30 @@ kv MINIMAX_API_KEY "$MINIMAX_API_KEY"
 
 [[ -f "$REPO_ROOT/scripts/provision-guest.sh" ]] || die "Missing: $REPO_ROOT/scripts/provision-guest.sh"
 
-scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$(ssh_known_hosts_file "$INSTANCE")" \
   "$REPO_ROOT/scripts/provision-guest.sh" "ubuntu@$VM_IP:/tmp/provision-guest.sh"
-scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$(ssh_known_hosts_file "$INSTANCE")" \
   "$PROVISION_VARS" "ubuntu@$VM_IP:/tmp/provision.vars"
 
-ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$(ssh_known_hosts_file "$INSTANCE")" \
   "ubuntu@$VM_IP" "sudo bash /tmp/provision-guest.sh /tmp/provision.vars"
+
+# Guest provisioning succeeded: from here on a failure must not destroy the
+# instance — it is recoverable with `fireclaw provision` / `fireclaw start`.
+CLEANUP_ARMED="false"
 
 systemctl enable --now "$PROXY_SVC"
 
 if ! wait_for_instance_health "$INSTANCE" "$VM_IP" "$HOST_PORT" "$SSH_KEY_PATH" 30; then
-  die "Health checks did not pass for $INSTANCE after provisioning"
+  warn "The instance was kept for inspection: sudo fireclaw status $INSTANCE"
+  die "Health checks did not pass for $INSTANCE after provisioning (retry with: sudo fireclaw provision $INSTANCE)"
 fi
-host_health_ok="true"
-guest_health_ok="true"
 SETUP_COMPLETE="true"
 
 echo "✓ VM instance configured"
 echo "  Instance: $INSTANCE"
 echo "  VM IP:    $VM_IP"
 echo "  Port:     $HOST_PORT"
-echo "  Token:    $GATEWAY_TOKEN"
-if [[ "$guest_health_ok" == "true" && "$host_health_ok" == "true" ]]; then
-  echo "  Health:   up (guest + proxy)"
-elif [[ "$guest_health_ok" == "true" ]]; then
-  echo "  Health:   guest up, proxy pending"
-elif [[ "$host_health_ok" == "true" ]]; then
-  echo "  Health:   proxy up (guest check pending)"
-else
-  echo "  Health:   pending (guest script: $GUEST_HEALTH_SCRIPT)"
-fi
+echo "  Token:    (print with: sudo fireclaw token $INSTANCE)"
+echo "  Health:   up (guest + proxy)"
 echo "  Status:   $(systemctl is-active "$VM_SVC") / $(systemctl is-active "$PROXY_SVC")"

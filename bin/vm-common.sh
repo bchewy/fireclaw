@@ -12,6 +12,7 @@ SUBNET_CIDR="${SUBNET_CIDR:-172.16.0.0/24}"
 
 OPENCLAW_IMAGE_DEFAULT="${OPENCLAW_IMAGE_DEFAULT:-ghcr.io/openclaw/openclaw:latest}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-/home/ubuntu/.ssh/vmdemo_vm}"
+SSH_KEY_PATH_DEFAULT="$SSH_KEY_PATH"
 
 log()  { printf '==> %s\n' "$*"; }
 warn() { printf 'Warning: %s\n' "$*" >&2; }
@@ -90,13 +91,37 @@ vm_service()        { printf 'firecracker-vmdemo-%s.service\n' "$1"; }
 proxy_service()     { printf 'vmdemo-proxy-%s.service\n' "$1"; }
 guest_health_script() { printf '/usr/local/bin/openclaw-health-%s.sh\n' "$1"; }
 
+# Pin the guest host key on first contact instead of discarding it; the pin
+# lives and dies with the instance state dir.
+ssh_known_hosts_file() {
+  local id="${1:-}"
+  if [[ -n "$id" && -d "$(instance_dir "$id")" ]]; then
+    printf '%s/known_hosts\n' "$(instance_dir "$id")"
+  else
+    printf '/dev/null\n'
+  fi
+}
+
+require_model_provider_key() {
+  local model="$1"
+  case "$model" in
+    openai/*)    [[ -n "${OPENAI_API_KEY:-}" ]]    || die "model '$model' requires an OpenAI API key (--openai-api-key or OPENAI_API_KEY)" ;;
+    anthropic/*) [[ -n "${ANTHROPIC_API_KEY:-}" ]] || die "model '$model' requires an Anthropic API key (--anthropic-api-key or ANTHROPIC_API_KEY)" ;;
+    minimax/*)   [[ -n "${MINIMAX_API_KEY:-}" ]]   || die "model '$model' requires a MiniMax API key (--minimax-api-key or MINIMAX_API_KEY)" ;;
+  esac
+}
+
 load_instance_env() {
   local id="$1"
   validate_instance_id "$id"
-  local f line key value
+  local f line key value k
   f="$(instance_env "$id")"
   [[ -f "$f" ]] || die "instance '$id' not found"
   [[ -r "$f" ]] || die "Cannot read instance state: $f (try: sudo fireclaw ...)"
+  for k in INSTANCE_ID HOST_PORT VM_IP VM_TAP VM_MAC GATEWAY_TOKEN MODEL SKILLS TELEGRAM_USERS OPENCLAW_IMAGE VM_VCPU VM_MEM_MIB DISK_SIZE API_SOCK SKIP_BROWSER_INSTALL ANTHROPIC_API_KEY OPENAI_API_KEY MINIMAX_API_KEY; do
+    printf -v "$k" '%s' ""
+  done
+  SSH_KEY_PATH="$SSH_KEY_PATH_DEFAULT"
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -n "$line" && "$line" != \#* ]] || continue
     [[ "$line" == *=* ]] || die "invalid state entry in $f: $line"
@@ -149,6 +174,7 @@ _host_port_in_use() {
 ensure_host_port_available() {
   local candidate="$1"
   validate_host_port "$candidate"
+  (( 10#$candidate >= 1024 )) || die "host port must be >= 1024 (the proxy runs unprivileged): $candidate"
   _host_port_allocated "$candidate" && die "Host port is already assigned to an existing instance: $candidate"
   _host_port_in_use "$candidate" && die "Host port is already in use on this host: $candidate"
   return 0
@@ -213,19 +239,6 @@ next_ip() {
   die "IP pool exhausted for subnet $prefix.0/$mask"
 }
 
-ensure_bridge_and_nat() {
-  if ! ip link show "$BRIDGE_NAME" >/dev/null 2>&1; then
-    ip link add "$BRIDGE_NAME" type bridge
-  fi
-  ip -4 addr show dev "$BRIDGE_NAME" | grep -Fq " $BRIDGE_ADDR " || ip addr add "$BRIDGE_ADDR" dev "$BRIDGE_NAME"
-  ip link set "$BRIDGE_NAME" up
-
-  sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
-  iptables -t nat -C POSTROUTING -s "$SUBNET_CIDR" ! -o "$BRIDGE_NAME" -j MASQUERADE 2>/dev/null \
-    || iptables -t nat -A POSTROUTING -s "$SUBNET_CIDR" ! -o "$BRIDGE_NAME" -j MASQUERADE
-}
-
 wait_for_ssh() {
   local ip="$1"
   local key="${2:-$SSH_KEY_PATH}"
@@ -235,39 +248,55 @@ wait_for_ssh() {
 
   if [[ ! -r "$key" ]]; then
     if [[ $EUID -ne 0 ]]; then
-      die "Cannot read SSH key: $key (try: sudo fireclaw ...)"
+      warn "Cannot read SSH key: $key (try: sudo fireclaw ...)"
     else
-      die "SSH key not found: $key"
+      warn "SSH key not found: $key"
     fi
+    return 1
   fi
 
   if [[ -n "$instance_id" ]]; then
     vm_svc="$(vm_service "$instance_id")"
   fi
 
-  local vm_state
+  local known_hosts vm_state
+  known_hosts="$(ssh_known_hosts_file "$instance_id")"
 
+  # Probe with /dev/null so a guest that regenerates host keys mid-boot (or
+  # accepts connections before authorized_keys lands) cannot poison the pin;
+  # the pin is recorded/verified only after the first successful login.
   local i
   for ((i=1; i<=retries; i++)); do
     if ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 "ubuntu@$ip" true >/dev/null 2>&1; then
+      if [[ "$known_hosts" != "/dev/null" ]] && \
+         ! ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=3 "ubuntu@$ip" true >/dev/null 2>&1; then
+        warn "Guest SSH host key does not match the pinned key in $known_hosts. If the change is expected (rebuilt VM), remove that file and retry."
+        return 1
+      fi
       return 0
     fi
     if [[ -n "$vm_svc" ]]; then
-      vm_state="$(systemctl is-active "$vm_svc" 2>/dev/null)" || vm_state="inactive"
-      if [[ "$vm_state" != "active" ]]; then
-        die "VM is not running ($(printf '\033[31m%s\033[0m' "$vm_state")). Start it with: sudo fireclaw start $instance_id"
-      fi
+      vm_state="$(systemctl is-active "$vm_svc" 2>/dev/null || true)"
+      case "$vm_state" in
+        active|activating|reloading|deactivating) ;;
+        *)
+          warn "VM is not running ($(printf '\033[31m%s\033[0m' "${vm_state:-inactive}")). Start it with: sudo fireclaw start $instance_id"
+          return 1
+          ;;
+      esac
     fi
     sleep 2
   done
-  die "VM is running but SSH did not become reachable at ubuntu@$ip after $((retries * 2))s"
+  warn "VM is running but SSH did not become reachable at ubuntu@$ip after $((retries * 2))s"
+  return 1
 }
 
 ssh_reachable() {
   local ip="$1"
   local key="${2:-$SSH_KEY_PATH}"
+  local instance_id="${3:-${INSTANCE_ID:-}}"
   [[ -r "$key" ]] || return 1
-  ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 "ubuntu@$ip" true >/dev/null 2>&1
+  ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$(ssh_known_hosts_file "$instance_id")" -o ConnectTimeout=3 "ubuntu@$ip" true >/dev/null 2>&1
 }
 
 check_guest_health() {
@@ -277,7 +306,7 @@ check_guest_health() {
   validate_instance_id "$id"
   local script
   script="$(guest_health_script "$id")"
-  ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 "ubuntu@$ip" "if [[ -x '$script' ]]; then sudo '$script'; else curl -fsS http://127.0.0.1:18789/health >/dev/null; fi" >/dev/null 2>&1
+  ssh -i "$key" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$(ssh_known_hosts_file "$id")" -o ConnectTimeout=3 "ubuntu@$ip" "if [[ -x '$script' ]]; then sudo '$script'; else curl -fsS http://127.0.0.1:18789/health >/dev/null; fi" >/dev/null 2>&1
 }
 
 wait_for_instance_health() {

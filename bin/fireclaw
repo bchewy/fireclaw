@@ -13,12 +13,13 @@ ${bold}USAGE${reset}
   fireclaw <command> [args...]
 
 ${bold}COMMANDS${reset}
+  ${cyan}doctor${reset}                       Check host prerequisites
   ${cyan}setup${reset} <flags...>             Create and provision a new VM instance
-  ${cyan}provision${reset} <id> [flags...]     Re-run guest provisioning for an existing instance
+  ${cyan}provision${reset} <id> [flags...]     Update saved config and re-run guest provisioning
   ${cyan}list${reset}                         List all instances
   ${cyan}status${reset} [id]                  Show instance status (all or one)
   ${cyan}start${reset} <id>                   Start an instance
-  ${cyan}stop${reset} <id>                    Stop an instance
+  ${cyan}stop${reset} <id>                    Stop an instance (stays stopped across host reboots)
   ${cyan}restart${reset} <id>                 Restart an instance
   ${cyan}logs${reset} <id> [guest|host]       Stream logs
   ${cyan}shell${reset} <id> [command...]      SSH into VM or run a command
@@ -26,8 +27,10 @@ ${bold}COMMANDS${reset}
   ${cyan}destroy${reset} <id> [--force]       Destroy an instance
 
 ${bold}EXAMPLES${reset}
-  ${dim}\$${reset} sudo fireclaw setup --instance my-bot --telegram-token <tok> --telegram-users <uid>
-  ${dim}\$${reset} sudo fireclaw provision my-bot
+  ${dim}\$${reset} sudo fireclaw doctor
+  ${dim}\$${reset} sudo fireclaw setup --instance my-bot --openai-api-key <key>
+  ${dim}\$${reset} sudo fireclaw setup --instance my-bot --telegram-token <tok> --telegram-users <uid> --openai-api-key <key>
+  ${dim}\$${reset} sudo fireclaw provision my-bot --model openai/gpt-5.5
   ${dim}\$${reset} sudo fireclaw list
   ${dim}\$${reset} sudo fireclaw status my-bot
   ${dim}\$${reset} sudo fireclaw shell my-bot
@@ -50,7 +53,7 @@ case "$cmd" in
     fi
     VM_SETUP_CMD_NAME="fireclaw setup" exec "$SCRIPT_DIR/vm-setup" "$@"
     ;;
-  list|status|start|stop|restart|logs|shell|token|destroy)
+  doctor|list|status|start|stop|restart|logs|shell|token|destroy)
     if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
       VM_CTL_CMD_NAME="fireclaw" exec "$SCRIPT_DIR/vm-ctl" --help
     fi
