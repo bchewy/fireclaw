@@ -71,12 +71,13 @@ load_vars_file
 require() { [[ -n "${!1:-}" ]] || { echo "Missing required var: $1" >&2; exit 1; }; }
 
 require INSTANCE_ID
-require TELEGRAM_TOKEN
-require TELEGRAM_USERS
 require MODEL
 require SKILLS
 require GATEWAY_TOKEN
 require OPENCLAW_IMAGE
+if [[ -n "${TELEGRAM_TOKEN:-}" ]]; then
+  require TELEGRAM_USERS
+fi
 
 [[ "$INSTANCE_ID" =~ ^[a-z0-9_-]+$ ]] || {
   echo "INSTANCE_ID must match [a-z0-9_-]+" >&2
@@ -244,12 +245,15 @@ ensure_docker_daemon_config
 
 skills_json="$(csv_json_array "${SKILLS:-}")"
 
-telegram_users_values="$(csv_values "${TELEGRAM_USERS:-}")"
-if [[ -z "$telegram_users_values" ]]; then
-  echo "TELEGRAM_USERS must include at least one allowed Telegram user ID; refusing to create an unreachable allowlist bot" >&2
-  exit 1
+telegram_allow_from_json="[]"
+if [[ -n "${TELEGRAM_TOKEN:-}" ]]; then
+  telegram_users_values="$(csv_values "${TELEGRAM_USERS:-}")"
+  if [[ -z "$telegram_users_values" ]]; then
+    echo "TELEGRAM_USERS must include at least one allowed Telegram user ID; refusing to create an unreachable allowlist bot" >&2
+    exit 1
+  fi
+  telegram_allow_from_json="$(printf '%s\n' "$telegram_users_values" | jq -R . | jq -s .)"
 fi
-telegram_allow_from_json="$(printf '%s\n' "$telegram_users_values" | jq -R . | jq -s .)"
 
 mkdir -p "$CONFIG_DIR" "$WORKSPACE_DIR" "$TOOLS_DIR"
 chown -R ubuntu:ubuntu "$CONFIG_ROOT" "/home/ubuntu/openclaw-${INSTANCE_ID}"
@@ -274,7 +278,7 @@ run_openclaw_cli() {
     --network host \
     -e HOME=/home/node \
     -e OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" \
-    -e OPENCLAW_TELEGRAM_TOKEN="$TELEGRAM_TOKEN" \
+    -e OPENCLAW_TELEGRAM_TOKEN="${TELEGRAM_TOKEN:-}" \
     -e OPENCLAW_MODEL="$MODEL" \
     -e OPENCLAW_TELEGRAM_ALLOW_FROM_JSON="$telegram_allow_from_json" \
     -e OPENCLAW_SKILLS_JSON="$skills_json" \
@@ -300,14 +304,28 @@ $OPENCLAW config set gateway.auth.token "$OPENCLAW_GATEWAY_TOKEN"
 $OPENCLAW config set gateway.tailscale.mode off
 $OPENCLAW config set agents.defaults.model.primary "$OPENCLAW_MODEL"
 $OPENCLAW config set agents.defaults.skipBootstrap false --json
+$OPENCLAW config set skills.allowBundled "$OPENCLAW_SKILLS_JSON" --json
+EOF
+
+if [[ -n "${TELEGRAM_TOKEN:-}" ]]; then
+  run_openclaw_cli <<'EOF'
+set -euo pipefail
+OPENCLAW='node /app/openclaw.mjs'
 $OPENCLAW config set channels.telegram.enabled true --json
 $OPENCLAW config set channels.telegram.botToken "$OPENCLAW_TELEGRAM_TOKEN"
 $OPENCLAW config set channels.telegram.dmPolicy allowlist
 $OPENCLAW config set channels.telegram.groupPolicy disabled
 $OPENCLAW config set channels.telegram.allowFrom "$OPENCLAW_TELEGRAM_ALLOW_FROM_JSON" --json
 $OPENCLAW config set plugins.entries.telegram.enabled true --json
-$OPENCLAW config set skills.allowBundled "$OPENCLAW_SKILLS_JSON" --json
 EOF
+else
+  run_openclaw_cli <<'EOF'
+set -euo pipefail
+OPENCLAW='node /app/openclaw.mjs'
+$OPENCLAW config set channels.telegram.enabled false --json
+$OPENCLAW config set plugins.entries.telegram.enabled false --json
+EOF
+fi
 
 if [[ "$MODEL" == minimax/* ]]; then
   OPENCLAW_MINIMAX_PROVIDER_JSON="$(jq -cn --arg api_key "${MINIMAX_API_KEY:-}" '

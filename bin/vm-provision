@@ -8,7 +8,22 @@ CMD_NAME="${VM_PROVISION_CMD_NAME:-fireclaw provision}"
 
 usage() {
   cat <<EOF
-Usage: $CMD_NAME <instance> [--telegram-users <csv>]
+Usage: $CMD_NAME <instance> [options]
+
+Each option updates the saved instance config, then guest provisioning reruns
+with the result. With no options, provisioning reruns with the saved config.
+
+Options:
+  --telegram-token <token>
+  --telegram-users <csv>
+  --model <id>
+  --skills <csv>
+  --openclaw-image <image>
+  --anthropic-api-key <key>
+  --openai-api-key <key>
+  --minimax-api-key <key>
+  --skip-browser-install
+  -h|--help
 EOF
 }
 
@@ -20,6 +35,12 @@ validate_no_newline() {
   local name="$1"
   local value="$2"
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "$name must not contain newlines"
+}
+
+require_option_value() {
+  local opt="$1"
+  local value="${2-}"
+  [[ -n "$value" && "$value" != --* ]] || die "Missing value for $opt"
 }
 
 set_kv() {
@@ -36,6 +57,12 @@ set_kv() {
   rm -f "$tmp"
 }
 
+saved_value() {
+  local file="$1"
+  local key="$2"
+  grep "^$key=" "$file" | tail -n 1 | cut -d= -f2- || true
+}
+
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
   usage
   exit 0
@@ -45,15 +72,20 @@ fi
 
 INSTANCE="$1"
 shift
-TELEGRAM_USERS_OVERRIDE=""
+
+declare -A OVERRIDES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --telegram-users)
-      [[ -n "${2-}" && "$2" != --* ]] || die "Missing value for --telegram-users"
-      TELEGRAM_USERS_OVERRIDE="$2"
-      shift 2
-      ;;
+    --telegram-token) require_option_value "$1" "${2-}"; OVERRIDES[TELEGRAM_TOKEN]="$2"; shift 2 ;;
+    --telegram-users) require_option_value "$1" "${2-}"; OVERRIDES[TELEGRAM_USERS]="$2"; shift 2 ;;
+    --model) require_option_value "$1" "${2-}"; OVERRIDES[MODEL]="$2"; shift 2 ;;
+    --skills) require_option_value "$1" "${2-}"; OVERRIDES[SKILLS]="$2"; shift 2 ;;
+    --openclaw-image) require_option_value "$1" "${2-}"; OVERRIDES[OPENCLAW_IMAGE]="$2"; shift 2 ;;
+    --anthropic-api-key) require_option_value "$1" "${2-}"; OVERRIDES[ANTHROPIC_API_KEY]="$2"; shift 2 ;;
+    --openai-api-key) require_option_value "$1" "${2-}"; OVERRIDES[OPENAI_API_KEY]="$2"; shift 2 ;;
+    --minimax-api-key) require_option_value "$1" "${2-}"; OVERRIDES[MINIMAX_API_KEY]="$2"; shift 2 ;;
+    --skip-browser-install) OVERRIDES[SKIP_BROWSER_INSTALL]="true"; shift ;;
     *)
       die "Unknown option: $1"
       ;;
@@ -65,31 +97,47 @@ require_root
 
 load_instance_env "$INSTANCE"
 
+ENV_FILE="$(instance_env "$INSTANCE")"
 PROVISION_VARS="$(instance_dir "$INSTANCE")/provision.vars"
 [[ -f "$PROVISION_VARS" ]] || die "Missing provision vars: $PROVISION_VARS"
 [[ -f "$REPO_ROOT/scripts/provision-guest.sh" ]] || die "Missing: $REPO_ROOT/scripts/provision-guest.sh"
 
-if [[ -n "$TELEGRAM_USERS_OVERRIDE" ]]; then
-  [[ -n "$(csv_values "$TELEGRAM_USERS_OVERRIDE")" ]] || die "--telegram-users must include at least one allowed Telegram user ID"
-  set_kv "$(instance_env "$INSTANCE")" TELEGRAM_USERS "$TELEGRAM_USERS_OVERRIDE"
-  set_kv "$PROVISION_VARS" TELEGRAM_USERS "$TELEGRAM_USERS_OVERRIDE"
-  TELEGRAM_USERS="$TELEGRAM_USERS_OVERRIDE"
+if [[ -n "${OVERRIDES[TELEGRAM_USERS]:-}" ]]; then
+  [[ -n "$(csv_values "${OVERRIDES[TELEGRAM_USERS]}")" ]] || die "--telegram-users must include at least one allowed Telegram user ID"
 fi
 
-if [[ -z "$(csv_values "${TELEGRAM_USERS:-}")" ]]; then
-  die "Saved TELEGRAM_USERS is empty; rerun with: sudo $CMD_NAME $INSTANCE --telegram-users <csv>"
+# TELEGRAM_TOKEN lives only in provision.vars; every other key is mirrored
+# into the .env state file that load_instance_env reads.
+for key in "${!OVERRIDES[@]}"; do
+  set_kv "$PROVISION_VARS" "$key" "${OVERRIDES[$key]}"
+  if [[ "$key" != "TELEGRAM_TOKEN" ]]; then
+    set_kv "$ENV_FILE" "$key" "${OVERRIDES[$key]}"
+  fi
+done
+
+if [[ ${#OVERRIDES[@]} -gt 0 ]]; then
+  load_instance_env "$INSTANCE"
 fi
+
+EFFECTIVE_TELEGRAM_TOKEN="$(saved_value "$PROVISION_VARS" TELEGRAM_TOKEN)"
+if [[ -n "$EFFECTIVE_TELEGRAM_TOKEN" ]]; then
+  if [[ -z "$(csv_values "${TELEGRAM_USERS:-}")" ]]; then
+    die "Telegram is enabled but saved TELEGRAM_USERS is empty; rerun with: sudo $CMD_NAME $INSTANCE --telegram-users <csv>"
+  fi
+fi
+
+require_model_provider_key "$MODEL"
 
 if ! wait_for_ssh "$VM_IP" "$SSH_KEY_PATH" 180 "$INSTANCE"; then
   die "VM SSH unreachable. Start it first: fireclaw start $INSTANCE"
 fi
 
-scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$(ssh_known_hosts_file "$INSTANCE")" \
   "$REPO_ROOT/scripts/provision-guest.sh" "ubuntu@$VM_IP:/tmp/provision-guest.sh"
-scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+scp -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$(ssh_known_hosts_file "$INSTANCE")" \
   "$PROVISION_VARS" "ubuntu@$VM_IP:/tmp/provision.vars"
 
-ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+ssh -i "$SSH_KEY_PATH" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$(ssh_known_hosts_file "$INSTANCE")" \
   "ubuntu@$VM_IP" "sudo bash /tmp/provision-guest.sh /tmp/provision.vars"
 
 systemctl enable --now "$(proxy_service "$INSTANCE")"
